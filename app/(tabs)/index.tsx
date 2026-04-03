@@ -212,6 +212,19 @@ export default function HomeScreen() {
   const weeklyChartData = getWeeklyChartData(dailyPoints);
   const weeklyMax = Math.max(10, ...weeklyChartData.map((item) => item.value));
 
+  // Calculate weekly total and trend
+  const weeklyTotal = weeklyChartData.reduce((sum, item) => sum + item.value, 0);
+  const firstThreeAvg =
+    weeklyChartData.slice(0, 3).reduce((sum, item) => sum + item.value, 0) / 3;
+  const lastThreeAvg =
+    weeklyChartData.slice(4, 7).reduce((sum, item) => sum + item.value, 0) / 3;
+  const trendArrow =
+    lastThreeAvg > firstThreeAvg * 1.1
+      ? "↑"
+      : lastThreeAvg < firstThreeAvg * 0.9
+        ? "↓"
+        : "→";
+
   const chartWidth = 280;
   const chartPaddingX = 16;
   const chartTop = 14;
@@ -518,9 +531,47 @@ export default function HomeScreen() {
               style={styles.splitRow}
             >
               <GlassCard style={styles.halfCard}>
-                <ThemedText type="subtitle" style={styles.miniTitle}>
-                  Weekly Chart
-                </ThemedText>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: 12,
+                  }}
+                >
+                  <ThemedText type="subtitle" style={styles.miniTitle}>
+                    Weekly Chart
+                  </ThemedText>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 8,
+                      backgroundColor: "rgba(22, 163, 74, 0.1)",
+                      paddingHorizontal: 10,
+                      paddingVertical: 6,
+                      borderRadius: 8,
+                    }}
+                  >
+                    <ThemedText
+                      style={{
+                        fontSize: 12,
+                        color: "#16A34A",
+                        fontWeight: "600",
+                      }}
+                    >
+                      {weeklyTotal} pts
+                    </ThemedText>
+                    <ThemedText
+                      style={{
+                        fontSize: 14,
+                        color: "#16A34A",
+                      }}
+                    >
+                      {trendArrow}
+                    </ThemedText>
+                  </View>
+                </View>
                 <View style={styles.weeklyChartWrap}>
                   <Svg viewBox="0 0 280 120" width="100%" height={120}>
                     <Defs>
