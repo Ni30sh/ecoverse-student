@@ -5,15 +5,26 @@ import {
     Pressable,
     ScrollView,
     StyleSheet,
+    View,
 } from "react-native";
+import { LinearGradient } from "expo-linear-gradient";
+import Animated, { FadeInDown } from "react-native-reanimated";
 
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
+import { GlassCard } from "@/components/ui/glass-card";
 import { supabaseQueries } from "@/lib/supabase/supabase-queries";
 import { getErrorMessage, retryQuery } from "@/lib/utils/resilience";
 import { useAuth } from "@/providers/auth-provider";
 
 type GenericRecord = Record<string, unknown>;
+
+function getMedalEmoji(index: number) {
+  if (index === 0) return "🥇";
+  if (index === 1) return "🥈";
+  if (index === 2) return "🥉";
+  return "";
+}
 
 function toNumber(record: GenericRecord | null | undefined, keys: string[]) {
   if (!record) {
@@ -140,51 +151,93 @@ export default function LeaderboardScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <ThemedText type="title">Leaderboard</ThemedText>
-      <ThemedText>
-        {viewerClass ? `Class: ${viewerClass}` : "Class ranking view"}
-      </ThemedText>
+      <Animated.View entering={FadeInDown.duration(350)}>
+        <GlassCard style={styles.headerCard}>
+          <ThemedText type="title" style={styles.headerTitle}>
+            🏆 Leaderboard
+          </ThemedText>
+          <ThemedText style={styles.headerSubtitle}>
+            {viewerClass ? `Class: ${viewerClass}` : "Global Rankings"}
+          </ThemedText>
+        </GlassCard>
+      </Animated.View>
 
       {loading ? (
         <ThemedView style={styles.centered}>
           <ActivityIndicator size="large" />
-          <ThemedText>Loading class ranking...</ThemedText>
+          <ThemedText>Loading rankings...</ThemedText>
         </ThemedView>
       ) : null}
 
       {errorMessage ? (
-        <ThemedText style={styles.errorText}>{errorMessage}</ThemedText>
+        <GlassCard style={styles.errorCard}>
+          <ThemedText style={styles.errorText}>{errorMessage}</ThemedText>
+        </GlassCard>
       ) : null}
 
-      <ThemedView style={styles.card}>
-        <ThemedText type="subtitle">Your Rank</ThemedText>
-        <ThemedText type="title">#{rank || 0}</ThemedText>
-      </ThemedView>
+      <Animated.View entering={FadeInDown.delay(60).duration(350)}>
+        <LinearGradient
+          colors={["#f59e0b", "#fbbf24"]}
+          style={styles.rankCard}
+        >
+          <ThemedText style={styles.rankLabel}>Your Rank</ThemedText>
+          <ThemedText style={styles.rankValue}>#{rank || 0}</ThemedText>
+        </LinearGradient>
+      </Animated.View>
 
-      <ThemedView style={styles.card}>
-        <ThemedText type="subtitle">Top Students</ThemedText>
-        {rankingRows.length === 0 ? (
-          <ThemedText>No leaderboard data found.</ThemedText>
-        ) : null}
-        {rankingRows.map((entry, index) => (
-          <ThemedText
-            key={`${String(entry.user_id ?? entry.id ?? index)}-${index}`}
-          >
-            {index + 1}.{" "}
-            {String(entry.name ?? entry.full_name ?? entry.email ?? "Student")}{" "}
-            - {toNumber(entry, ["eco_points", "points", "total_points"])}
+      <Animated.View entering={FadeInDown.delay(105).duration(350)}>
+        <GlassCard style={styles.leaderboardCard}>
+          <ThemedText type="subtitle" style={styles.leaderboardTitle}>
+            Top Students
           </ThemedText>
-        ))}
-      </ThemedView>
+          {rankingRows.length === 0 ? (
+            <ThemedText style={styles.emptyText}>
+              No leaderboard data found.
+            </ThemedText>
+          ) : (
+            <View style={styles.rankingList}>
+              {rankingRows.map((entry, index) => (
+                <View
+                  key={`${String(entry.user_id ?? entry.id ?? index)}-${index}`}
+                  style={styles.rankingRow}
+                >
+                  <View style={styles.rankingLeft}>
+                    <ThemedText style={styles.rankMedal}>
+                      {getMedalEmoji(index) || `${index + 1}`}
+                    </ThemedText>
+                    <View style={styles.rankingInfo}>
+                      <ThemedText style={styles.rankingName}>
+                        {String(
+                          entry.name ?? entry.full_name ?? entry.email ?? "Student"
+                        )}
+                      </ThemedText>
+                    </View>
+                  </View>
+                  <ThemedText style={styles.rankingPoints}>
+                    {toNumber(entry, ["eco_points", "points", "total_points"])}
+                  </ThemedText>
+                </View>
+              ))}
+            </View>
+          )}
+        </GlassCard>
+      </Animated.View>
 
-      <Pressable
-        style={styles.refreshButton}
-        onPress={() => void loadLeaderboard()}
-      >
-        <ThemedText style={styles.refreshButtonLabel}>
-          Refresh Ranking
-        </ThemedText>
-      </Pressable>
+      <Animated.View entering={FadeInDown.delay(150).duration(350)}>
+        <Pressable
+          style={styles.refreshButton}
+          onPress={() => void loadLeaderboard()}
+        >
+          <LinearGradient
+            colors={["#10b981", "#34d399"]}
+            style={styles.refreshGradient}
+          >
+            <ThemedText style={styles.refreshButtonLabel}>
+              ↻ Refresh Ranking
+            </ThemedText>
+          </LinearGradient>
+        </Pressable>
+      </Animated.View>
     </ScrollView>
   );
 }
@@ -194,31 +247,104 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 12,
   },
+  headerCard: {
+    gap: 6,
+  },
+  headerTitle: {
+    fontSize: 28,
+    fontWeight: "700",
+  },
+  headerSubtitle: {
+    fontSize: 13,
+    opacity: 0.7,
+  },
   centered: {
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
     paddingVertical: 20,
   },
-  card: {
+  errorCard: {
     borderWidth: 1,
-    borderColor: "rgba(10,126,164,0.22)",
-    borderRadius: 14,
-    padding: 14,
-    gap: 8,
-  },
-  refreshButton: {
-    minHeight: 44,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(10,126,164,0.12)",
-  },
-  refreshButtonLabel: {
-    color: "#0a7ea4",
-    fontWeight: "700",
+    borderColor: "rgba(239, 68, 68, 0.3)",
   },
   errorText: {
-    color: "#b00020",
+    color: "#ef4444",
+  },
+  rankCard: {
+    borderRadius: 14,
+    padding: 20,
+    gap: 8,
+  },
+  rankLabel: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "rgba(255, 255, 255, 0.8)",
+  },
+  rankValue: {
+    fontSize: 32,
+    fontWeight: "700",
+    color: "#ffffff",
+  },
+  leaderboardCard: {
+    gap: 16,
+  },
+  leaderboardTitle: {
+    fontSize: 18,
+    fontWeight: "600",
+  },
+  emptyText: {
+    opacity: 0.6,
+  },
+  rankingList: {
+    gap: 10,
+  },
+  rankingRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: "rgba(16, 185, 129, 0.03)",
+  },
+  rankingLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    flex: 1,
+  },
+  rankMedal: {
+    fontSize: 20,
+    fontWeight: "700",
+    minWidth: 32,
+    textAlign: "center",
+  },
+  rankingInfo: {
+    flex: 1,
+  },
+  rankingName: {
+    fontSize: 15,
+    fontWeight: "500",
+  },
+  rankingPoints: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#16A34A",
+  },
+  refreshButton: {
+    minHeight: 48,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  refreshGradient: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  refreshButtonLabel: {
+    color: "#ffffff",
+    fontWeight: "700",
+    fontSize: 14,
   },
 });

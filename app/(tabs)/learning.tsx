@@ -8,10 +8,12 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  View,
 } from "react-native";
+import Animated, { FadeInDown } from "react-native-reanimated";
 
 import { ThemedText } from "@/components/themed-text";
-import { ThemedView } from "@/components/themed-view";
+import { GlassCard } from "@/components/ui/glass-card";
 import { useLearningTopics } from "@/lib/hooks/use-learning-hub-data";
 import { invalidateStudentCache } from "@/lib/query/invalidate-student-cache";
 import { supabase } from "@/lib/supabase/client";
@@ -269,62 +271,76 @@ export default function LearningScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <ThemedText type="title">Learning</ThemedText>
-      <ThemedText>
-        Read lessons, complete them, and auto-save quiz attempts.
-      </ThemedText>
+      <Animated.View entering={FadeInDown.duration(350)}>
+        <GlassCard style={styles.headerCard}>
+          <ThemedText type="title" style={styles.headerTitle}>
+            📚 Learning
+          </ThemedText>
+          <ThemedText style={styles.headerSubtitle}>
+            Master topics through lessons and quizzes
+          </ThemedText>
+        </GlassCard>
+      </Animated.View>
 
-      <ThemedView style={styles.topicRow}>
-        {topicOptions.map((topic) => (
-          <Pressable
-            key={topic.id}
-            onPress={() => {
-              setTopicFilter(topic.id);
-              setLoading(true);
-            }}
-            style={[
-              styles.topicChip,
-              topicFilter === topic.id ? styles.topicChipActive : null,
-            ]}
-          >
-            <ThemedText
-              style={
-                topicFilter === topic.id
-                  ? styles.topicChipLabelActive
-                  : undefined
-              }
+      <Animated.View entering={FadeInDown.delay(60).duration(350)}>
+        <View style={styles.topicRow}>
+          {topicOptions.map((topic, index) => (
+            <Pressable
+              key={topic.id}
+              onPress={() => {
+                setTopicFilter(topic.id);
+                setLoading(true);
+              }}
+              style={[
+                styles.topicChip,
+                topicFilter === topic.id ? styles.topicChipActive : null,
+              ]}
             >
-              {topic.title}
-            </ThemedText>
-          </Pressable>
-        ))}
-      </ThemedView>
+              <ThemedText
+                style={
+                  topicFilter === topic.id
+                    ? styles.topicChipLabelActive
+                    : styles.topicChipLabel
+                }
+              >
+                {topic.title}
+              </ThemedText>
+            </Pressable>
+          ))}
+        </View>
+      </Animated.View>
 
-      <Pressable
-        style={styles.secondaryButton}
-        onPress={() => void loadLessons()}
-      >
-        <ThemedText style={styles.secondaryButtonLabel}>
-          Reload Lessons
-        </ThemedText>
-      </Pressable>
+      <Animated.View entering={FadeInDown.delay(105).duration(350)}>
+        <Pressable
+          style={styles.reloadButton}
+          onPress={() => void loadLessons()}
+        >
+          <ThemedText style={styles.reloadButtonLabel}>
+            ↻ Reload Lessons
+          </ThemedText>
+        </Pressable>
+      </Animated.View>
 
       {loading ? (
-        <ThemedView style={styles.centered}>
+        <View style={styles.centered}>
           <ActivityIndicator size="large" />
           <ThemedText>Loading lessons...</ThemedText>
-        </ThemedView>
+        </View>
       ) : null}
 
       {errorMessage ? (
-        <ThemedText style={styles.errorText}>{errorMessage}</ThemedText>
+        <GlassCard style={styles.errorCard}>
+          <ThemedText style={styles.errorText}>{errorMessage}</ThemedText>
+        </GlassCard>
       ) : null}
 
       {!loading && lessons.length === 0 ? (
-        <ThemedText>No lessons found.</ThemedText>
+        <GlassCard>
+          <ThemedText>No lessons found.</ThemedText>
+        </GlassCard>
       ) : null}
 
-      {lessons.map((lesson) => {
+      {lessons.map((lesson, lessonIndex) => {
         const id = lessonId(lesson);
         const isBusy = busyLessonId === id;
         const topicKey = topicKeyForLesson(lesson);
@@ -333,52 +349,62 @@ export default function LearningScreen() {
           : topicTitleById.get(topicKey.replace(/^id:/, "")) ?? "Uncategorized";
 
         return (
-          <ThemedView key={id || lessonTitle(lesson)} style={styles.card}>
-            <ThemedText type="subtitle">{lessonTitle(lesson)}</ThemedText>
-            <ThemedText>Topic: {topicLabel}</ThemedText>
-            <ThemedText>
-              {String(
-                lesson.description ?? lesson.content ?? "No lesson text.",
-              )}
-            </ThemedText>
+          <Animated.View
+            key={id || lessonTitle(lesson)}
+            entering={FadeInDown.delay(150 + lessonIndex * 45).duration(350)}
+          >
+            <GlassCard style={styles.lessonCard}>
+              <View style={styles.lessonHeader}>
+                <View style={{ flex: 1 }}>
+                  <ThemedText type="subtitle" style={styles.lessonTitle}>
+                    {lessonTitle(lesson)}
+                  </ThemedText>
+                  <ThemedText style={styles.lessonTopic}>
+                    📌 {topicLabel}
+                  </ThemedText>
+                </View>
+              </View>
 
-            <Pressable
-              style={({ pressed }) => [
-                styles.secondaryButton,
-                pressed ? styles.pressed : null,
-              ]}
-              onPress={() => {
-                if (!id) {
-                  return;
-                }
-                router.push({
-                  pathname: "/lesson/[lessonId]",
-                  params: { lessonId: id },
-                });
-              }}
-            >
-              <ThemedText style={styles.secondaryButtonLabel}>
-                Open Lesson Detail
+              <ThemedText style={styles.lessonContent}>
+                {String(
+                  lesson.description ?? lesson.content ?? "No lesson text.",
+                )}
               </ThemedText>
-            </Pressable>
 
-            <Pressable
-              style={({ pressed }) => [
-                styles.primaryButton,
-                pressed ? styles.pressed : null,
-              ]}
-              onPress={() => void completeLesson(lesson)}
-              disabled={isBusy || !id}
-            >
-              {isBusy ? (
-                <ActivityIndicator color="#ffffff" />
-              ) : (
-                <ThemedText style={styles.primaryButtonLabel}>
-                  Mark Complete + Save Quiz
-                </ThemedText>
-              )}
-            </Pressable>
-          </ThemedView>
+              <View style={styles.lessonActions}>
+                <Pressable
+                  style={styles.secondaryAction}
+                  onPress={() => {
+                    if (!id) {
+                      return;
+                    }
+                    router.push({
+                      pathname: "/lesson/[lessonId]",
+                      params: { lessonId: id },
+                    });
+                  }}
+                >
+                  <ThemedText style={styles.secondaryActionLabel}>
+                    📖 Read Details
+                  </ThemedText>
+                </Pressable>
+
+                <Pressable
+                  style={styles.primaryAction}
+                  onPress={() => void completeLesson(lesson)}
+                  disabled={isBusy || !id}
+                >
+                  {isBusy ? (
+                    <ActivityIndicator color="#ffffff" size="small" />
+                  ) : (
+                    <ThemedText style={styles.primaryActionLabel}>
+                      ✓ Complete
+                    </ThemedText>
+                  )}
+                </Pressable>
+              </View>
+            </GlassCard>
+          </Animated.View>
         );
       })}
     </ScrollView>
@@ -390,6 +416,17 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 12,
   },
+  headerCard: {
+    gap: 6,
+  },
+  headerTitle: {
+    fontSize: 28,
+    fontWeight: "700",
+  },
+  headerSubtitle: {
+    fontSize: 13,
+    opacity: 0.7,
+  },
   topicRow: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -397,17 +434,34 @@ const styles = StyleSheet.create({
   },
   topicChip: {
     borderWidth: 1,
-    borderColor: "rgba(10,126,164,0.4)",
+    borderColor: "rgba(59, 130, 246, 0.3)",
     borderRadius: 16,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     paddingVertical: 6,
   },
   topicChipActive: {
-    backgroundColor: "#0a7ea4",
-    borderColor: "#0a7ea4",
+    backgroundColor: "#3b82f6",
+    borderColor: "#3b82f6",
+  },
+  topicChipLabel: {
+    fontWeight: "500",
+    fontSize: 12,
   },
   topicChipLabelActive: {
     color: "#ffffff",
+    fontWeight: "600",
+  },
+  reloadButton: {
+    minHeight: 40,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(16, 185, 129, 0.12)",
+  },
+  reloadButtonLabel: {
+    color: "#10b981",
+    fontWeight: "600",
+    fontSize: 13,
   },
   centered: {
     alignItems: "center",
@@ -415,40 +469,61 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingVertical: 20,
   },
-  card: {
+  errorCard: {
     borderWidth: 1,
-    borderColor: "rgba(10,126,164,0.22)",
-    borderRadius: 14,
-    padding: 14,
-    gap: 8,
+    borderColor: "rgba(239, 68, 68, 0.3)",
   },
-  primaryButton: {
-    marginTop: 8,
-    minHeight: 48,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#0a7ea4",
+  errorText: {
+    color: "#ef4444",
   },
-  primaryButtonLabel: {
-    color: "#ffffff",
-    fontWeight: "700",
+  lessonCard: {
+    gap: 12,
   },
-  secondaryButton: {
-    minHeight: 44,
+  lessonHeader: {
+    gap: 6,
+  },
+  lessonTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  lessonTopic: {
+    fontSize: 12,
+    opacity: 0.7,
+    marginTop: 4,
+  },
+  lessonContent: {
+    fontSize: 13,
+    opacity: 0.8,
+    lineHeight: 18,
+  },
+  lessonActions: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  secondaryAction: {
+    flex: 1,
+    minHeight: 40,
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(10,126,164,0.12)",
+    backgroundColor: "rgba(107, 114, 128, 0.12)",
   },
-  secondaryButtonLabel: {
-    color: "#0a7ea4",
+  secondaryActionLabel: {
+    color: "#6b7280",
+    fontWeight: "600",
+    fontSize: 12,
+  },
+  primaryAction: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#3b82f6",
+  },
+  primaryActionLabel: {
+    color: "#ffffff",
     fontWeight: "700",
-  },
-  pressed: {
-    opacity: 0.86,
-  },
-  errorText: {
-    color: "#b00020",
+    fontSize: 12,
   },
 });

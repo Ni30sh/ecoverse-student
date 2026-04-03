@@ -13,7 +13,7 @@ import {
 import Animated, { FadeInDown, FadeOutUp } from "react-native-reanimated";
 
 import { ThemedText } from "@/components/themed-text";
-import { ThemedView } from "@/components/themed-view";
+import { GlassCard } from "@/components/ui/glass-card";
 import { invalidateStudentCache } from "@/lib/query/invalidate-student-cache";
 import { supabaseQueries } from "@/lib/supabase/supabase-queries";
 import { getErrorMessage, retryQuery } from "@/lib/utils/resilience";
@@ -204,19 +204,27 @@ export default function MissionsScreen() {
         </Animated.View>
       ) : null}
       <ScrollView contentContainerStyle={styles.container}>
-        <ThemedText type="title">Missions</ThemedText>
-        <ThemedText>
-          Start missions and submit proof for teacher review.
-        </ThemedText>
+        <Animated.View entering={FadeInDown.duration(350)}>
+          <GlassCard style={styles.headerCard}>
+            <ThemedText type="title" style={styles.headerTitle}>
+              🎯 Missions
+            </ThemedText>
+            <ThemedText style={styles.headerSubtitle}>
+              Complete missions and submit proof for teacher review
+            </ThemedText>
+          </GlassCard>
+        </Animated.View>
 
-        <Pressable
-          style={styles.secondaryButton}
-          onPress={() => void loadMissions()}
-        >
-          <ThemedText style={styles.secondaryButtonLabel}>
-            Reload Missions
-          </ThemedText>
-        </Pressable>
+        <Animated.View entering={FadeInDown.delay(60).duration(350)}>
+          <Pressable
+            style={styles.reloadButton}
+            onPress={() => void loadMissions()}
+          >
+            <ThemedText style={styles.reloadButtonLabel}>
+              ↻ Reload Missions
+            </ThemedText>
+          </Pressable>
+        </Animated.View>
 
         {loading ? (
           <View style={styles.centered}>
@@ -226,112 +234,135 @@ export default function MissionsScreen() {
         ) : null}
 
         {errorMessage ? (
-          <ThemedText style={styles.errorText}>{errorMessage}</ThemedText>
+          <GlassCard style={styles.errorCard}>
+            <ThemedText style={styles.errorText}>{errorMessage}</ThemedText>
+          </GlassCard>
         ) : null}
 
         {!loading && missions.length === 0 ? (
-          <ThemedText>No missions found.</ThemedText>
+          <GlassCard>
+            <ThemedText>No missions found.</ThemedText>
+          </GlassCard>
         ) : null}
 
-        {missions.map((mission) => {
+        {missions.map((mission, missionIndex) => {
           const id = missionId(mission);
           const busyStart = submittingId === id;
 
           return (
-            <ThemedView key={id || missionTitle(mission)} style={styles.card}>
-              <ThemedText type="subtitle">{missionTitle(mission)}</ThemedText>
-              <ThemedText>{missionDescription(mission)}</ThemedText>
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.secondarySubmitButton,
-                  pressed ? styles.pressed : null,
-                ]}
-                onPress={() => {
-                  if (!id) {
-                    return;
-                  }
-                  router.push({
-                    pathname: "/mission/[missionId]",
-                    params: { missionId: id },
-                  });
-                }}
-              >
-                <ThemedText style={styles.secondaryButtonLabel}>
-                  Open Mission Detail
-                </ThemedText>
-              </Pressable>
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.primaryButton,
-                  pressed ? styles.pressed : null,
-                ]}
-                onPress={() => void startMission(mission)}
-                disabled={busyStart || !id}
-              >
-                {busyStart ? (
-                  <ActivityIndicator color="#ffffff" />
-                ) : (
-                  <ThemedText style={styles.primaryButtonLabel}>
-                    Start Mission
-                  </ThemedText>
-                )}
-              </Pressable>
-
-              <ThemedText style={styles.metaText}>
-                Complete steps, upload proof, and final submission from Mission
-                Detail.
-              </ThemedText>
-            </ThemedView>
-          );
-        })}
-
-        <ThemedView style={styles.historyCard}>
-          <ThemedText type="subtitle">My Submissions</ThemedText>
-          {recentSubmissions.length === 0 ? (
-            <ThemedText>No submissions yet.</ThemedText>
-          ) : null}
-          {recentSubmissions.slice(0, 8).map((entry, index) => {
-            const status = submissionStatus(entry);
-            const missionRef = String(entry.mission_id ?? "N/A");
-            const resolvedMissionTitle =
-              missionTitleById[missionRef] ?? `Mission ${missionRef}`;
-            return (
-              <ThemedView
-                key={`${String(entry.id ?? index)}-${index}`}
-                style={styles.historyItem}
-              >
-                <ThemedText>Mission: {resolvedMissionTitle}</ThemedText>
-                <View style={styles.statusRow}>
-                  <ThemedText>Status:</ThemedText>
-                  <View
-                    style={[
-                      styles.statusChip,
-                      status === "approved" ? styles.statusApproved : null,
-                      status === "rejected" ? styles.statusRejected : null,
-                      status === "submitted" ? styles.statusSubmitted : null,
-                      status === "in_progress" ? styles.statusInProgress : null,
-                    ]}
-                  >
-                    <ThemedText style={styles.statusChipText}>
-                      {status}
+            <Animated.View
+              key={id || missionTitle(mission)}
+              entering={FadeInDown.delay(105 + missionIndex * 45).duration(350)}
+            >
+              <GlassCard style={styles.missionCard}>
+                <View style={styles.missionHeader}>
+                  <View style={{ flex: 1 }}>
+                    <ThemedText type="subtitle" style={styles.missionTitle}>
+                      {missionTitle(mission)}
+                    </ThemedText>
+                    <ThemedText style={styles.missionDescription}>
+                      {missionDescription(mission)}
                     </ThemedText>
                   </View>
                 </View>
-                <ThemedText>
-                  Updated:{" "}
-                  {String(
-                    entry.updated_at ??
-                      entry.submitted_at ??
-                      entry.created_at ??
-                      "N/A",
-                  )}
+
+                <View style={styles.missionActions}>
+                  <Pressable
+                    style={styles.secondaryAction}
+                    onPress={() => {
+                      if (!id) {
+                        return;
+                      }
+                      router.push({
+                        pathname: "/mission/[missionId]",
+                        params: { missionId: id },
+                      });
+                    }}
+                  >
+                    <ThemedText style={styles.secondaryActionLabel}>
+                      📋 View Details
+                    </ThemedText>
+                  </Pressable>
+
+                  <Pressable
+                    style={styles.primaryAction}
+                    onPress={() => void startMission(mission)}
+                    disabled={busyStart || !id}
+                  >
+                    {busyStart ? (
+                      <ActivityIndicator color="#ffffff" size="small" />
+                    ) : (
+                      <ThemedText style={styles.primaryActionLabel}>
+                        ▶ Start
+                      </ThemedText>
+                    )}
+                  </Pressable>
+                </View>
+
+                <ThemedText style={styles.metaText}>
+                  Complete steps → upload proof → submit from detail page
                 </ThemedText>
-              </ThemedView>
-            );
-          })}
-        </ThemedView>
+              </GlassCard>
+            </Animated.View>
+          );
+        })}
+
+        <Animated.View entering={FadeInDown.delay(600).duration(360)}>
+          <GlassCard style={styles.historyCard}>
+            <ThemedText type="subtitle" style={styles.historyTitle}>
+              📊 My Submissions
+            </ThemedText>
+            {recentSubmissions.length === 0 ? (
+              <ThemedText style={styles.emptyText}>No submissions yet.</ThemedText>
+            ) : (
+              <View style={styles.historyList}>
+                {recentSubmissions.slice(0, 8).map((entry, index) => {
+                  const status = submissionStatus(entry);
+                  const missionRef = String(entry.mission_id ?? "N/A");
+                  const resolvedMissionTitle =
+                    missionTitleById[missionRef] ?? `Mission ${missionRef}`;
+                  return (
+                    <View
+                      key={`${String(entry.id ?? index)}-${index}`}
+                      style={styles.historyItem}
+                    >
+                      <View style={styles.historyItemTop}>
+                        <ThemedText style={styles.historyMissionName}>
+                          {resolvedMissionTitle}
+                        </ThemedText>
+                        <View
+                          style={[
+                            styles.statusChip,
+                            status === "approved" ? styles.statusApproved : null,
+                            status === "rejected" ? styles.statusRejected : null,
+                            status === "pending"
+                              ? styles.statusPending
+                              : null,
+                            status === "in_progress"
+                              ? styles.statusInProgress
+                              : null,
+                          ]}
+                        >
+                          <ThemedText style={styles.statusChipText}>
+                            {status}
+                          </ThemedText>
+                        </View>
+                      </View>
+                      <ThemedText style={styles.historyTimestamp}>
+                        {String(
+                          entry.updated_at ??
+                            entry.submitted_at ??
+                            entry.created_at ??
+                            "N/A",
+                        )}
+                      </ThemedText>
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </GlassCard>
+        </Animated.View>
       </ScrollView>
     </View>
   );
@@ -354,99 +385,148 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 12,
   },
+  headerCard: {
+    gap: 6,
+  },
+  headerTitle: {
+    fontSize: 28,
+    fontWeight: "700",
+  },
+  headerSubtitle: {
+    fontSize: 13,
+    opacity: 0.7,
+  },
+  reloadButton: {
+    minHeight: 40,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(59, 130, 246, 0.12)",
+  },
+  reloadButtonLabel: {
+    color: "#3b82f6",
+    fontWeight: "600",
+    fontSize: 13,
+  },
   centered: {
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
     paddingVertical: 20,
   },
-  card: {
+  errorCard: {
     borderWidth: 1,
-    borderColor: "rgba(10,126,164,0.22)",
-    borderRadius: 14,
-    padding: 14,
+    borderColor: "rgba(239, 68, 68, 0.3)",
+  },
+  errorText: {
+    color: "#ef4444",
+  },
+  missionCard: {
+    gap: 12,
+  },
+  missionHeader: {
     gap: 8,
   },
-  primaryButton: {
-    marginTop: 8,
-    minHeight: 48,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#0a7ea4",
+  missionTitle: {
+    fontSize: 16,
+    fontWeight: "600",
   },
-  primaryButtonLabel: {
-    color: "#ffffff",
-    fontWeight: "700",
+  missionDescription: {
+    fontSize: 13,
+    opacity: 0.7,
+    marginTop: 4,
   },
-  secondaryButton: {
-    minHeight: 44,
+  missionActions: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  secondaryAction: {
+    flex: 1,
+    minHeight: 40,
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(10,126,164,0.12)",
+    backgroundColor: "rgba(59, 130, 246, 0.12)",
   },
-  secondaryButtonLabel: {
-    color: "#0a7ea4",
+  secondaryActionLabel: {
+    color: "#3b82f6",
+    fontWeight: "600",
+    fontSize: 13,
+  },
+  primaryAction: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    backgroundColor: "#10b981",
+  },
+  primaryActionLabel: {
+    color: "#ffffff",
     fontWeight: "700",
-  },
-  pressed: {
-    opacity: 0.86,
+    fontSize: 13,
   },
   metaText: {
     fontSize: 12,
-    opacity: 0.8,
+    opacity: 0.6,
+    marginTop: 4,
   },
-  secondarySubmitButton: {
-    marginTop: 8,
-    minHeight: 46,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#136f8f",
+  emptyText: {
+    opacity: 0.6,
   },
   historyCard: {
-    borderWidth: 1,
-    borderColor: "rgba(10,126,164,0.2)",
-    borderRadius: 12,
-    padding: 12,
+    gap: 12,
+  },
+  historyTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  historyList: {
     gap: 8,
   },
   historyItem: {
     borderWidth: 1,
-    borderColor: "rgba(10,126,164,0.14)",
+    borderColor: "rgba(156, 163, 175, 0.2)",
     borderRadius: 10,
-    padding: 8,
-    gap: 4,
-  },
-  statusRow: {
-    flexDirection: "row",
-    alignItems: "center",
+    padding: 10,
     gap: 6,
+    backgroundColor: "rgba(16, 185, 129, 0.02)",
+  },
+  historyItemTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  historyMissionName: {
+    fontWeight: "600",
+    fontSize: 14,
+    flex: 1,
+  },
+  historyTimestamp: {
+    fontSize: 12,
+    opacity: 0.6,
   },
   statusChip: {
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 999,
-    backgroundColor: "rgba(110,110,110,0.16)",
+    backgroundColor: "rgba(107, 114, 128, 0.2)",
   },
   statusApproved: {
-    backgroundColor: "rgba(46,125,50,0.22)",
+    backgroundColor: "rgba(16, 185, 129, 0.2)",
   },
   statusRejected: {
-    backgroundColor: "rgba(176,0,32,0.22)",
+    backgroundColor: "rgba(239, 68, 68, 0.2)",
   },
-  statusSubmitted: {
-    backgroundColor: "rgba(19,111,143,0.22)",
+  statusPending: {
+    backgroundColor: "rgba(59, 130, 246, 0.2)",
   },
   statusInProgress: {
-    backgroundColor: "rgba(245,124,0,0.22)",
+    backgroundColor: "rgba(245, 158, 11, 0.2)",
   },
   statusChipText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "700",
-  },
-  errorText: {
-    color: "#b00020",
   },
 });
