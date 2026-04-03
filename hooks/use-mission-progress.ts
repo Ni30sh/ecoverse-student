@@ -1,6 +1,6 @@
 import { supabaseQueries } from "@/integrations/supabase/queries";
 import { useQuery } from "@tanstack/react-query";
-import { useAuth } from "./useAuth";
+import { useAuth } from "./use-auth";
 
 export interface MissionProgressData {
   submission: any | null;
@@ -42,7 +42,9 @@ export function useMissionProgress(missionId: string): MissionProgressData {
           return null;
         }
 
-        const submission = submissions.find((s) => s?.mission_id === missionId);
+        const submission = submissions.find(
+          (s: any) => s?.mission_id === missionId,
+        );
         return submission || null;
       } catch (error) {
         console.error(

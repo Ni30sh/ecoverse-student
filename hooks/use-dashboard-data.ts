@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useToast } from "@/components/ui/toast-provider";
+import { queryKeys } from "@/lib/query/query-keys";
 import { supabase } from "@/lib/supabase/client";
 import { supabaseQueries } from "@/lib/supabase/supabase-queries";
 import { logTelemetry } from "@/lib/utils/telemetry";
@@ -193,8 +194,6 @@ async function updateSubmissionStatus(
     proof_url: payload.photoUrl ?? null,
     proof_photo_url: payload.photoUrl ?? null,
     notes: payload.notes ?? null,
-    location_lat: payload.coords?.lat ?? null,
-    location_lng: payload.coords?.lng ?? null,
     latitude: payload.coords?.lat ?? null,
     longitude: payload.coords?.lng ?? null,
     submitted_at: new Date().toISOString(),
@@ -237,25 +236,78 @@ export function useDashboardData() {
   const queryClient = useQueryClient();
 
   const userId = user?.id;
+  const authProfile = (profile as GenericRecord | null) ?? null;
+
+  const profileQuery = useQuery({
+    queryKey: userId ? queryKeys.profile(userId) : ["profile", "anonymous"],
+    queryFn: async () => {
+      if (!userId) {
+        return null;
+      }
+
+      const result = await supabaseQueries.profiles.getById(userId);
+      if (result.error) {
+        logTelemetry(
+          "warn",
+          "dashboard_profile_query_failed",
+          String(result.error),
+          { userId },
+        );
+        return authProfile;
+      }
+
+      return (result.data ?? null) as GenericRecord | null;
+    },
+    enabled: Boolean(userId),
+    staleTime: 30 * 1000,
+  });
+
+  const effectiveProfile =
+    (profileQuery.data as GenericRecord | null | undefined) ?? authProfile;
+
   const currentSchoolName = toText(
-    (profile as GenericRecord | null)?.school_name,
+    effectiveProfile?.school_name,
     "",
   );
   const previousSubmissionStatusRef = useRef<Record<string, string>>({});
 
+  const invalidateLiveStudentViews = useCallback(
+    async (reason: string) => {
+      if (!userId) return;
+
+      if (__DEV__) {
+        console.log("[student-realtime] invalidating student caches", {
+          userId,
+          reason,
+        });
+      }
+
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.submissions(userId),
+        }),
+        queryClient.invalidateQueries({ queryKey: ["activity", userId] }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.profile(userId) }),
+        queryClient.invalidateQueries({ queryKey: ["rank", userId] }),
+        queryClient.invalidateQueries({ queryKey: ["leaderboard"] }),
+        queryClient.invalidateQueries({ queryKey: ["weekly-points", userId] }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.dailyPoints(userId) }),
+      ]);
+    },
+    [queryClient, userId],
+  );
+
   const refreshProfile = useCallback(async () => {
     if (!userId) return;
 
-    // Refresh dependent dashboard caches and profile-backed queries.
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["rank", userId] }),
-      queryClient.invalidateQueries({ queryKey: ["leaderboard"] }),
-      queryClient.invalidateQueries({ queryKey: ["weekly-points", userId] }),
-    ]);
+    await invalidateLiveStudentViews("refresh_profile");
 
-    // Trigger a direct profile read to surface RLS/data errors early.
-    await supabaseQueries.profiles.getById(userId);
-  }, [queryClient, userId]);
+    // Trigger direct profile read and write into cache so UI updates immediately.
+    const latestProfile = await supabaseQueries.profiles.getById(userId);
+    if (!latestProfile.error && latestProfile.data) {
+      queryClient.setQueryData(queryKeys.profile(userId), latestProfile.data);
+    }
+  }, [invalidateLiveStudentViews, queryClient, userId]);
 
   useEffect(() => {
     if (!userId) return;
@@ -284,12 +336,14 @@ export function useDashboardData() {
               "realtime_mission_submissions_change",
               "Change detected in mission_submissions",
             );
-            await Promise.all([
-              queryClient.invalidateQueries({
-                queryKey: ["submissions", userId],
-              }),
-              queryClient.invalidateQueries({ queryKey: ["activity", userId] }),
-            ]);
+            if (__DEV__) {
+              console.log("[student-realtime] mission_submissions event", {
+                eventType: payload.eventType,
+                table: payload.table,
+                userId,
+              });
+            }
+            await invalidateLiveStudentViews("mission_submissions_change");
           },
         );
 
@@ -309,16 +363,14 @@ export function useDashboardData() {
               "realtime_submissions_change",
               "Change detected in submissions",
             );
-            await Promise.all([
-              queryClient.invalidateQueries({
-                queryKey: ["submissions", userId],
-              }),
-              queryClient.invalidateQueries({ queryKey: ["activity", userId] }),
-              queryClient.invalidateQueries({
-                queryKey: ["dashboard-missions"],
-              }),
-            ]);
-            await refreshProfile();
+            if (__DEV__) {
+              console.log("[student-realtime] submissions event", {
+                eventType: payload.eventType,
+                table: payload.table,
+                userId,
+              });
+            }
+            await invalidateLiveStudentViews("submissions_change");
           },
         );
 
@@ -360,13 +412,14 @@ export function useDashboardData() {
               "realtime_daily_points_change",
               "Daily points updated",
             );
-            await Promise.all([
-              queryClient.invalidateQueries({
-                queryKey: ["weekly-points", userId],
-              }),
-              queryClient.invalidateQueries({ queryKey: ["rank", userId] }),
-              queryClient.invalidateQueries({ queryKey: ["leaderboard"] }),
-            ]);
+            if (__DEV__) {
+              console.log("[student-realtime] daily_points event", {
+                eventType: payload.eventType,
+                table: payload.table,
+                userId,
+              });
+            }
+            await invalidateLiveStudentViews("daily_points_change");
           },
         );
 
@@ -386,13 +439,7 @@ export function useDashboardData() {
               "realtime_weekly_points_change",
               "Weekly points updated",
             );
-            await Promise.all([
-              queryClient.invalidateQueries({
-                queryKey: ["weekly-points", userId],
-              }),
-              queryClient.invalidateQueries({ queryKey: ["rank", userId] }),
-              queryClient.invalidateQueries({ queryKey: ["leaderboard"] }),
-            ]);
+            await invalidateLiveStudentViews("weekly_points_change");
           },
         );
 
@@ -400,7 +447,7 @@ export function useDashboardData() {
         channel = channel.on(
           "postgres_changes",
           {
-            event: "UPDATE",
+            event: "*",
             schema: "public",
             table: "profiles",
             filter: `id=eq.${userId}`,
@@ -408,7 +455,14 @@ export function useDashboardData() {
           async (payload) => {
             if (unsubscribed) return;
             logTelemetry("info", "realtime_profile_change", "Profile updated");
-            await refreshProfile();
+            if (__DEV__) {
+              console.log("[student-realtime] profiles event", {
+                eventType: payload.eventType,
+                table: payload.table,
+                userId,
+              });
+            }
+            await invalidateLiveStudentViews("profiles_change");
           },
         );
 
@@ -416,7 +470,7 @@ export function useDashboardData() {
         channel = channel.on(
           "postgres_changes",
           {
-            event: "UPDATE",
+            event: "*",
             schema: "public",
             table: "students",
             filter: `id=eq.${userId}`,
@@ -428,7 +482,14 @@ export function useDashboardData() {
               "realtime_student_change",
               "Student profile updated",
             );
-            await refreshProfile();
+            if (__DEV__) {
+              console.log("[student-realtime] students event", {
+                eventType: payload.eventType,
+                table: payload.table,
+                userId,
+              });
+            }
+            await invalidateLiveStudentViews("students_change");
           },
         );
 
@@ -495,7 +556,7 @@ export function useDashboardData() {
         void supabase.removeChannel(liveChannel);
       }
     };
-  }, [queryClient, refreshProfile, userId]);
+  }, [invalidateLiveStudentViews, queryClient, userId]);
 
   const rankQuery = useQuery({
     queryKey: ["rank", userId],
@@ -732,49 +793,100 @@ export function useDashboardData() {
     mutationFn: async (missionId: string) => {
       if (!userId) throw new Error("Not authenticated");
 
+      const missionResponse = await supabaseQueries.missions.getById(missionId);
+      const mission = (missionResponse.data ?? null) as GenericRecord | null;
+      const missionReward = Math.max(
+        0,
+        toInt(mission?.eco_points_reward ?? mission?.points ?? 0),
+      );
+
       // Check if already accepted before attempting to create
       const existing =
         await supabaseQueries.missionSubmissions.getSubmissionForMission(
           userId,
           missionId,
         );
-      if (!existing.error && existing.data) {
-        logTelemetry(
-          "info",
-          "dashboard_mission_already_accepted",
-          "Mission already in progress",
-          { userId, missionId },
-        );
-        return existing.data;
+      let submission = !existing.error ? (existing.data ?? null) : null;
+      let submissionId = toText((submission as GenericRecord | null)?.id);
+
+      if (submission) {
+        const currentStatus = toText((submission as GenericRecord).status).toLowerCase();
+        if (currentStatus === "approved") {
+          logTelemetry(
+            "info",
+            "dashboard_mission_already_completed",
+            "Mission already completed",
+            { userId, missionId },
+          );
+          return {
+            submission,
+            autoCompleted: true,
+            pointsAwarded: 0,
+            alreadyAccepted: true,
+          };
+        }
       }
 
-      const created = await supabaseQueries.missionSubmissions.create({
-        user_id: userId,
-        mission_id: missionId,
-        status: "in_progress",
-      });
+      if (!submissionId) {
+        const created = await supabaseQueries.missionSubmissions.create({
+          user_id: userId,
+          mission_id: missionId,
+          status: "in_progress",
+        });
 
-      if (created.error) {
-        logTelemetry(
-          "error",
-          "dashboard_mission_create_failed",
-          String(created.error),
-          { userId, missionId },
-        );
-        throw created.error;
+        if (created.error) {
+          logTelemetry(
+            "error",
+            "dashboard_mission_create_failed",
+            String(created.error),
+            { userId, missionId },
+          );
+          throw created.error;
+        }
+
+        if (!created.data) {
+          throw new Error("Failed to create mission submission");
+        }
+
+        submission = created.data;
+        submissionId = toText((created.data as GenericRecord).id);
       }
 
-      if (!created.data) {
-        throw new Error("Failed to create mission submission");
+      if (!submissionId) {
+        throw new Error("Mission submission id missing");
       }
 
-      return created.data;
+      // Student submits proof -> submitProof mutation handles auto-approve logic
+      // or sets to pending for teacher review. Never auto-approve at Accept step.
+      logTelemetry(
+        "info",
+        "dashboard_mission_accepted",
+        "Mission accepted, student can now submit proof",
+        { userId, missionId, submissionId },
+      );
+
+      return {
+        submission,
+        autoCompleted: false,
+        pointsAwarded: 0,
+        alreadyAccepted: Boolean(existing.data),
+      };
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["submissions", userId] });
       queryClient.invalidateQueries({ queryKey: ["activity", userId] });
+      queryClient.invalidateQueries({ queryKey: ["weekly-points", userId] });
+      queryClient.invalidateQueries({ queryKey: ["rank", userId] });
+      queryClient.invalidateQueries({ queryKey: ["leaderboard"] });
+      queryClient.invalidateQueries({ queryKey: ["notifications", userId] });
+
+      if (result?.alreadyAccepted) {
+        showToast("Quest already started.", "info");
+        return;
+      }
+
       showToast(
-        "Quest accepted. Complete and submit proof for points.",
+        "Quest accepted. Now submit your proof for teacher review.",
         "success",
       );
     },
@@ -966,7 +1078,7 @@ export function useDashboardData() {
   };
 
   return {
-    profile,
+    profile: effectiveProfile,
     rank: rankQuery.data ?? 999,
     leaderboard: leaderboardQuery.data ?? [],
     missions: missionsQuery.data ?? [],
@@ -977,7 +1089,7 @@ export function useDashboardData() {
     unreadCount,
     treesPlanted: treesPlantedQuery.data ?? 0,
     realUserCount: realUserCountQuery.data ?? 0,
-    isLoading: !profile || missionsQuery.isLoading,
+    isLoading: !effectiveProfile || missionsQuery.isLoading || profileQuery.isLoading,
     acceptMission,
     submitProof,
     checkAutoApprove,

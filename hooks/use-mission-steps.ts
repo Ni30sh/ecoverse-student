@@ -1,6 +1,6 @@
 import { supabaseQueries } from "@/integrations/supabase/queries";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useAuth } from "./useAuth";
+import { useAuth } from "./use-auth";
 
 export interface SubmitStepInput {
   missionSubmissionId: string;
@@ -75,7 +75,9 @@ export function useMissionSteps(
           return null;
         }
 
-        const submission = submissions.find((s) => s?.mission_id === missionId);
+        const submission = submissions.find(
+          (s: any) => s?.mission_id === missionId,
+        );
         return submission || null;
       } catch (error) {
         console.error(

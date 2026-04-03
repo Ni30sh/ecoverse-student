@@ -1,8 +1,8 @@
 import { supabaseQueries } from "@/integrations/supabase/queries";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
-import { useToast } from "./use-toast";
-import { useAuth } from "./useAuth";
+import { useToast } from "@/components/ui/toast-provider";
+import { useAuth } from "./use-auth";
 
 export interface ProfileStats {
   missionsCompleted: number;
@@ -85,7 +85,7 @@ export function useProfileData(): UseProfileDataReturn {
 
         // Filter for approved submissions only
         const approved = submissions.filter(
-          (s) => s && s.status === "approved",
+          (s: any) => s && s.status === "approved",
         );
 
         return approved;
@@ -177,7 +177,7 @@ export function useProfileData(): UseProfileDataReturn {
           return 0;
         }
 
-        const total = weekly.reduce((sum, d) => {
+        const total = weekly.reduce((sum: number, d: any) => {
           const points = d?.points_earned ? Number(d.points_earned) : 0;
           return sum + (Number.isFinite(points) ? points : 0);
         }, 0);
@@ -269,7 +269,7 @@ export function useProfileData(): UseProfileDataReturn {
             let filtered = submissions;
             if (filter === "week") {
               const weekStart = getWeekStartDate();
-              filtered = submissions.filter((s) => {
+              filtered = submissions.filter((s: any) => {
                 const submittedAt = s?.submitted_at
                   ? String(s.submitted_at)
                   : "";
@@ -277,7 +277,7 @@ export function useProfileData(): UseProfileDataReturn {
               });
             } else if (filter === "month") {
               const monthStart = getMonthStartDate();
-              filtered = submissions.filter((s) => {
+              filtered = submissions.filter((s: any) => {
                 const submittedAt = s?.submitted_at
                   ? String(s.submitted_at)
                   : "";
@@ -286,7 +286,7 @@ export function useProfileData(): UseProfileDataReturn {
             }
 
             // Sort by submitted_at descending
-            const sorted = filtered.sort((a, b) => {
+            const sorted = filtered.sort((a: any, b: any) => {
               const aTime = a?.submitted_at
                 ? new Date(a.submitted_at).getTime()
                 : 0;
@@ -364,18 +364,11 @@ export function useProfileData(): UseProfileDataReturn {
         queryClient.invalidateQueries({ queryKey: ["profile-rank", userId] }),
       ]);
 
-      showToast({
-        title: "Profile updated! 🌿",
-        type: "success",
-      });
+      showToast("Profile updated! 🌿", "success");
     },
     onError: (err: Error) => {
       console.error("[useProfileData] Update profile error:", err);
-      showToast({
-        title: "Error",
-        description: err.message || "Failed to update profile",
-        type: "error",
-      });
+      showToast(err.message || "Failed to update profile", "error");
     },
   });
 
@@ -410,18 +403,11 @@ export function useProfileData(): UseProfileDataReturn {
         queryKey: ["teacher-leaderboard"],
       });
 
-      showToast({
-        title: "Avatar updated! ✨",
-        type: "success",
-      });
+      showToast("Avatar updated! ✨", "success");
     },
     onError: (err: Error) => {
       console.error("[useProfileData] Update avatar error:", err);
-      showToast({
-        title: "Error",
-        description: err.message || "Failed to update avatar",
-        type: "error",
-      });
+      showToast(err.message || "Failed to update avatar", "error");
     },
   });
 
@@ -471,7 +457,7 @@ export function useProfileStats() {
       try {
         const submissions =
           await supabaseQueries.missionSubmissions.getUserSubmissions(userId);
-        return submissions?.filter((s) => s?.status === "approved") || [];
+        return submissions?.filter((s: any) => s?.status === "approved") || [];
       } catch (error) {
         console.error("[useProfileStats] Error:", error);
         return [];
@@ -488,13 +474,13 @@ export function useProfileStats() {
     return {
       missionsCompleted: submissions.length,
       treesPlanted: submissions.filter(
-        (s) => s?.missions?.category === "planting",
+        (s: any) => s?.missions?.category === "planting",
       ).length,
       waterMissions: submissions.filter(
-        (s) => s?.missions?.category === "water",
+        (s: any) => s?.missions?.category === "water",
       ).length,
       wasteMissions: submissions.filter(
-        (s) => s?.missions?.category === "waste",
+        (s: any) => s?.missions?.category === "waste",
       ).length,
     };
   }, [approvedSubmissionsQuery.data]);

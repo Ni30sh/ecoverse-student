@@ -1,9 +1,5 @@
 import { useFocusEffect } from "@react-navigation/native";
 import { useQueryClient } from "@tanstack/react-query";
-import * as Haptics from "expo-haptics";
-import { Image } from "expo-image";
-import * as ImagePicker from "expo-image-picker";
-import * as Location from "expo-location";
 import { router } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -18,16 +14,12 @@ import Animated, { FadeInDown, FadeOutUp } from "react-native-reanimated";
 
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
-import { useToast } from "@/components/ui/toast-provider";
 import { invalidateStudentCache } from "@/lib/query/invalidate-student-cache";
 import { supabaseQueries } from "@/lib/supabase/supabase-queries";
 import { getErrorMessage, retryQuery } from "@/lib/utils/resilience";
 import { useAuth } from "@/providers/auth-provider";
 
 type MissionRecord = Record<string, unknown>;
-type StepRecord = Record<string, unknown>;
-type ProofAsset = { uri: string; mimeType?: string };
-type ProofLocation = { lat: number; lng: number };
 
 function missionTitle(mission: MissionRecord) {
   return String(mission.title ?? mission.name ?? "Untitled Mission");
@@ -49,29 +41,13 @@ function submissionStatus(submission: MissionRecord) {
 
 export default function MissionsScreen() {
   const { user } = useAuth();
-  const { showToast } = useToast();
   const queryClient = useQueryClient();
   const [loading, setLoading] = useState(true);
   const [submittingId, setSubmittingId] = useState("");
   const [missions, setMissions] = useState<MissionRecord[]>([]);
   const [submissions, setSubmissions] = useState<MissionRecord[]>([]);
-  const [stepsByMission, setStepsByMission] = useState<
-    Record<string, StepRecord[]>
-  >({});
-  const [submissionIdByMission, setSubmissionIdByMission] = useState<
-    Record<string, string>
-  >({});
-  const [stepProgressByMission, setStepProgressByMission] = useState<
-    Record<string, Record<string, boolean>>
-  >({});
-  const [proofByMission, setProofByMission] = useState<
-    Record<string, ProofAsset>
-  >({});
-  const [locationByMission, setLocationByMission] = useState<
-    Record<string, ProofLocation>
-  >({});
   const [errorMessage, setErrorMessage] = useState("");
-  const [showConfetti, setShowConfetti] = useState(false);
+  const [showConfetti] = useState(false);
 
   const missionTitleById = useMemo(() => {
     return missions.reduce<Record<string, string>>((acc, mission) => {
@@ -173,35 +149,15 @@ export default function MissionsScreen() {
     const existingSubmission = submissions.find((entry) => {
       const missionMatch = String(entry.mission_id ?? "") === selectedMissionId;
       const status = String(entry.status ?? "").toLowerCase();
-      return (
-        missionMatch && (status === "in_progress" || status === "submitted")
-      );
+      return missionMatch && status !== "approved";
     });
 
     if (existingSubmission) {
-      const existingSubmissionId = String(existingSubmission.id ?? "");
-      if (existingSubmissionId) {
-        setSubmissionIdByMission((prev) => ({
-          ...prev,
-          [selectedMissionId]: existingSubmissionId,
-        }));
-
-        const existingSteps = await retryQuery(() =>
-          supabaseQueries.missionSteps.getByMissionId(selectedMissionId),
-        );
-        if (!existingSteps.error) {
-          setStepsByMission((prev) => ({
-            ...prev,
-            [selectedMissionId]: (existingSteps.data ?? []) as StepRecord[],
-          }));
-        }
-
-        Alert.alert(
-          "Already active",
-          "You already have an active submission for this mission.",
-        );
-        return;
-      }
+      router.push({
+        pathname: "/mission/[missionId]",
+        params: { missionId: selectedMissionId },
+      });
+      return;
     }
 
     setSubmittingId(selectedMissionId);
@@ -223,309 +179,17 @@ export default function MissionsScreen() {
       return;
     }
 
-    const submissionId = String(startResponse.data.id ?? "");
-    if (!submissionId) {
-      Alert.alert("Started", "Mission started, but submission id is missing.");
-      setSubmittingId("");
-      return;
-    }
-
-    setSubmissionIdByMission((prev) => ({
-      ...prev,
-      [selectedMissionId]: submissionId,
-    }));
-
-    const stepResponse = await retryQuery(() =>
-      supabaseQueries.missionSteps.getByMissionId(selectedMissionId),
+    Alert.alert(
+      "Mission started",
+      "Mission workspace opened. Complete requirements there and submit final proof from detail screen.",
     );
-    if (stepResponse.error) {
-      Alert.alert(
-        "Mission started",
-        `Failed to load steps: ${getErrorMessage(stepResponse.error, "Unknown error")}`,
-      );
-    } else {
-      setStepsByMission((prev) => ({
-        ...prev,
-        [selectedMissionId]: (stepResponse.data ?? []) as StepRecord[],
-      }));
-    }
-
-    Alert.alert("Mission started", "Now submit mission steps and final proof.");
-    await invalidateStudentCache(queryClient, user.id);
-    setSubmittingId("");
-  };
-
-  const submitStep = async (mission: MissionRecord, step: StepRecord) => {
-    if (!user) {
-      return;
-    }
-
-    const selectedMissionId = missionId(mission);
-    const selectedStepId = String(step.id ?? "");
-    const submissionId = submissionIdByMission[selectedMissionId];
-
-    if (!selectedMissionId || !selectedStepId) {
-      Alert.alert("Cannot submit step", "Mission or step id is missing.");
-      return;
-    }
-
-    if (!submissionId) {
-      Alert.alert("Cannot submit step", "Start this mission first.");
-      return;
-    }
-
-    setSubmittingId(`${selectedMissionId}:${selectedStepId}`);
-
-    const response = await retryQuery(() =>
-      supabaseQueries.missionStepSubmissions.submitStep({
-        user_id: user.id,
-        mission_step_id: selectedStepId,
-        submission_id: submissionId,
-        status: "completed",
-        notes: "Completed from student app.",
-      }),
-    );
-
-    if (response.error) {
-      Alert.alert(
-        "Step submission failed",
-        getErrorMessage(response.error, "Could not submit this step."),
-      );
-      setSubmittingId("");
-      return;
-    }
-
-    setStepProgressByMission((prev) => ({
-      ...prev,
-      [selectedMissionId]: {
-        ...(prev[selectedMissionId] ?? {}),
-        [selectedStepId]: true,
-      },
-    }));
-
-    await invalidateStudentCache(queryClient, user.id);
-    setSubmittingId("");
-  };
-
-  const submitMissionProof = async (mission: MissionRecord) => {
-    if (!user) {
-      return;
-    }
-
-    const selectedMissionId = missionId(mission);
-    const submissionId = submissionIdByMission[selectedMissionId];
-
-    if (!submissionId) {
-      Alert.alert("Cannot submit proof", "Start this mission first.");
-      return;
-    }
-
-    const missionProof = proofByMission[selectedMissionId];
-    if (!missionProof?.uri) {
-      Alert.alert(
-        "Proof required",
-        "Please upload a mission photo before final submit.",
-      );
-      return;
-    }
-
-    const missionSteps = stepsByMission[selectedMissionId] ?? [];
-    if (missionSteps.length > 0) {
-      const progressMap = stepProgressByMission[selectedMissionId] ?? {};
-      const incomplete = missionSteps.some((step, index) => {
-        const stepId = String(step.id ?? index);
-        return !Boolean(progressMap[stepId]);
-      });
-
-      if (incomplete) {
-        Alert.alert(
-          "Steps pending",
-          "Please complete all mission steps before final proof submission.",
-        );
-        return;
-      }
-    }
-
-    setSubmittingId(`${selectedMissionId}:proof`);
-
-    const uploadResponse = await retryQuery(() =>
-      supabaseQueries.storage.uploadMissionProof({
-        userId: user.id,
-        missionId: selectedMissionId,
-        localUri: missionProof.uri,
-        mimeType: missionProof.mimeType,
-      }),
-    );
-
-    if (uploadResponse.error || !uploadResponse.data) {
-      Alert.alert(
-        "Upload failed",
-        getErrorMessage(
-          uploadResponse.error,
-          "Failed to upload mission proof image.",
-        ),
-      );
-      setSubmittingId("");
-      return;
-    }
-
-    const uploadedProof = uploadResponse.data;
-
-    const selectedLocation = locationByMission[selectedMissionId] ?? {
-      lat: 0,
-      lng: 0,
-    };
-
-    const proofResponse = await retryQuery(() =>
-      supabaseQueries.missionSubmissions.submitProof(
-        submissionId,
-        uploadedProof.publicUrl,
-        "Submitted from student mobile app.",
-        { lat: selectedLocation.lat, lng: selectedLocation.lng },
-      ),
-    );
-
-    if (proofResponse.error) {
-      Alert.alert(
-        "Proof not submitted",
-        getErrorMessage(proofResponse.error, "Could not submit proof."),
-      );
-      setSubmittingId("");
-      return;
-    }
-
-    const finalStatus = String(
-      proofResponse.data?.status ?? "pending",
-    ).toLowerCase();
-    setShowConfetti(true);
-    setTimeout(() => setShowConfetti(false), 1200);
-    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-
-    if (finalStatus === "approved") {
-      Alert.alert(
-        "Mission approved",
-        "Great work. Points and streak were updated.",
-      );
-      showToast("Mission approved. Amazing work.", "success");
-    } else {
-      Alert.alert(
-        "Mission submitted",
-        "Your mission is pending teacher review.",
-      );
-      showToast("Mission submitted for review.", "info");
-    }
-
     await invalidateStudentCache(queryClient, user.id);
     void loadMissions();
-
+    router.push({
+      pathname: "/mission/[missionId]",
+      params: { missionId: selectedMissionId },
+    });
     setSubmittingId("");
-  };
-
-  const pickProofPhoto = async (mission: MissionRecord) => {
-    const selectedMissionId = missionId(mission);
-    if (!selectedMissionId) {
-      return;
-    }
-
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert(
-        "Permission needed",
-        "Allow photo library access to upload mission proof.",
-      );
-      return;
-    }
-
-    const pickerResult = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ["images"],
-      quality: 0.7,
-    });
-
-    if (pickerResult.canceled || pickerResult.assets.length === 0) {
-      return;
-    }
-
-    const asset = pickerResult.assets[0];
-
-    setProofByMission((prev) => ({
-      ...prev,
-      [selectedMissionId]: {
-        uri: asset.uri,
-        mimeType: asset.mimeType,
-      },
-    }));
-
-    Alert.alert("Proof selected", "Photo attached to this mission.");
-  };
-
-  const captureProofPhoto = async (mission: MissionRecord) => {
-    const selectedMissionId = missionId(mission);
-    if (!selectedMissionId) {
-      return;
-    }
-
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert(
-        "Permission needed",
-        "Allow camera access to capture mission proof.",
-      );
-      return;
-    }
-
-    const cameraResult = await ImagePicker.launchCameraAsync({
-      mediaTypes: ["images"],
-      quality: 0.7,
-    });
-
-    if (cameraResult.canceled || cameraResult.assets.length === 0) {
-      return;
-    }
-
-    const asset = cameraResult.assets[0];
-
-    setProofByMission((prev) => ({
-      ...prev,
-      [selectedMissionId]: {
-        uri: asset.uri,
-        mimeType: asset.mimeType,
-      },
-    }));
-
-    Alert.alert("Photo captured", "Camera photo attached to this mission.");
-  };
-
-  const captureLocation = async (mission: MissionRecord) => {
-    const selectedMissionId = missionId(mission);
-    if (!selectedMissionId) {
-      return;
-    }
-
-    const permission = await Location.requestForegroundPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert(
-        "Permission needed",
-        "Allow location access for mission proof submission.",
-      );
-      return;
-    }
-
-    const position = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.Balanced,
-    });
-
-    setLocationByMission((prev) => ({
-      ...prev,
-      [selectedMissionId]: {
-        lat: position.coords.latitude,
-        lng: position.coords.longitude,
-      },
-    }));
-
-    Alert.alert(
-      "Location captured",
-      "Current location added to this mission proof.",
-    );
   };
 
   return (
@@ -572,12 +236,6 @@ export default function MissionsScreen() {
         {missions.map((mission) => {
           const id = missionId(mission);
           const busyStart = submittingId === id;
-          const busyProof = submittingId === `${id}:proof`;
-          const missionSteps = stepsByMission[id] ?? [];
-          const stepProgress = stepProgressByMission[id] ?? {};
-          const hasPhoto = Boolean(proofByMission[id]?.uri);
-          const hasLocation = Boolean(locationByMission[id]);
-          const location = locationByMission[id];
 
           return (
             <ThemedView key={id || missionTitle(mission)} style={styles.card}>
@@ -586,7 +244,7 @@ export default function MissionsScreen() {
 
               <Pressable
                 style={({ pressed }) => [
-                  styles.secondaryButton,
+                  styles.secondarySubmitButton,
                   pressed ? styles.pressed : null,
                 ]}
                 onPress={() => {
@@ -621,119 +279,10 @@ export default function MissionsScreen() {
                 )}
               </Pressable>
 
-              {missionSteps.length > 0 ? (
-                <ThemedView style={styles.stepsBox}>
-                  <ThemedText type="defaultSemiBold">Mission Steps</ThemedText>
-                  {missionSteps.map((step, index) => {
-                    const stepId = String(step.id ?? index);
-                    const stepBusy = submittingId === `${id}:${stepId}`;
-                    const completed = Boolean(stepProgress[stepId]);
-
-                    return (
-                      <ThemedView
-                        key={`${stepId}-${index}`}
-                        style={styles.stepCard}
-                      >
-                        <ThemedText>
-                          {index + 1}.{" "}
-                          {String(step.title ?? step.name ?? "Step")}
-                        </ThemedText>
-                        <Pressable
-                          style={({ pressed }) => [
-                            styles.smallButton,
-                            completed ? styles.successButton : null,
-                            pressed ? styles.pressed : null,
-                          ]}
-                          onPress={() => void submitStep(mission, step)}
-                          disabled={stepBusy || completed}
-                        >
-                          {stepBusy ? (
-                            <ActivityIndicator color="#ffffff" />
-                          ) : (
-                            <ThemedText style={styles.smallButtonLabel}>
-                              {completed ? "Completed" : "Submit Step"}
-                            </ThemedText>
-                          )}
-                        </Pressable>
-                      </ThemedView>
-                    );
-                  })}
-                </ThemedView>
-              ) : null}
-
-              <ThemedView style={styles.assetRow}>
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.smallActionButton,
-                    pressed ? styles.pressed : null,
-                  ]}
-                  onPress={() => void pickProofPhoto(mission)}
-                >
-                  <ThemedText style={styles.smallButtonLabel}>
-                    {hasPhoto ? "Gallery Updated" : "Upload Photo"}
-                  </ThemedText>
-                </Pressable>
-
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.smallActionButton,
-                    pressed ? styles.pressed : null,
-                  ]}
-                  onPress={() => void captureProofPhoto(mission)}
-                >
-                  <ThemedText style={styles.smallButtonLabel}>
-                    Use Camera
-                  </ThemedText>
-                </Pressable>
-
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.smallActionButton,
-                    pressed ? styles.pressed : null,
-                  ]}
-                  onPress={() => void captureLocation(mission)}
-                >
-                  <ThemedText style={styles.smallButtonLabel}>
-                    {hasLocation ? "Location Updated" : "Add Location"}
-                  </ThemedText>
-                </Pressable>
-              </ThemedView>
-
-              {hasPhoto ? (
-                <ThemedView style={styles.previewBox}>
-                  <Image
-                    source={{ uri: proofByMission[id].uri }}
-                    style={styles.previewImage}
-                    contentFit="cover"
-                  />
-                  <ThemedText style={styles.metaText}>
-                    Photo ready for upload.
-                  </ThemedText>
-                </ThemedView>
-              ) : null}
-
-              {hasLocation && location ? (
-                <ThemedText style={styles.metaText}>
-                  Location: {location.lat.toFixed(4)}, {location.lng.toFixed(4)}
-                </ThemedText>
-              ) : null}
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.secondarySubmitButton,
-                  pressed ? styles.pressed : null,
-                ]}
-                onPress={() => void submitMissionProof(mission)}
-                disabled={busyProof || !id}
-              >
-                {busyProof ? (
-                  <ActivityIndicator color="#ffffff" />
-                ) : (
-                  <ThemedText style={styles.primaryButtonLabel}>
-                    Submit Final Proof
-                  </ThemedText>
-                )}
-              </Pressable>
+              <ThemedText style={styles.metaText}>
+                Complete steps, upload proof, and final submission from Mission
+                Detail.
+              </ThemedText>
             </ThemedView>
           );
         })}
@@ -844,60 +393,9 @@ const styles = StyleSheet.create({
   pressed: {
     opacity: 0.86,
   },
-  stepsBox: {
-    marginTop: 6,
-    borderWidth: 1,
-    borderColor: "rgba(10,126,164,0.18)",
-    borderRadius: 10,
-    padding: 10,
-    gap: 8,
-  },
-  stepCard: {
-    borderWidth: 1,
-    borderColor: "rgba(10,126,164,0.14)",
-    borderRadius: 8,
-    padding: 8,
-    gap: 8,
-  },
-  smallButton: {
-    minHeight: 36,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#0a7ea4",
-  },
-  assetRow: {
-    marginTop: 4,
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  smallActionButton: {
-    minWidth: 104,
-    paddingHorizontal: 8,
-    minHeight: 36,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(10,126,164,0.22)",
-  },
-  previewBox: {
-    marginTop: 8,
-    gap: 6,
-  },
-  previewImage: {
-    width: "100%",
-    height: 150,
-    borderRadius: 10,
-  },
   metaText: {
     fontSize: 12,
     opacity: 0.8,
-  },
-  smallButtonLabel: {
-    color: "#ffffff",
-    fontWeight: "700",
-    fontSize: 12,
   },
   secondarySubmitButton: {
     marginTop: 8,
@@ -906,9 +404,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#136f8f",
-  },
-  successButton: {
-    backgroundColor: "#2e7d32",
   },
   historyCard: {
     borderWidth: 1,

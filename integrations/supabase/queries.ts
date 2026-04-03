@@ -1,4 +1,4 @@
-import { supabase } from "./client";
+import { supabase } from "@/lib/supabase/client";
 
 // Types - using 'any' for flexibility until proper types are defined
 type TablesInsert<T extends string> = Record<string, any>;
@@ -15,7 +15,7 @@ type ProfileWithSchoolName = {
 /**
  * Normalize profile data - handle school joins
  */
-function normalizeProfileSchool(row: any): ProfileWithSchoolName {
+function normalizeProfileSchool(row: any): ProfileWithSchoolName | null {
   if (!row) return null;
 
   const schoolFromJoin = Array.isArray(row?.schools)
@@ -117,7 +117,9 @@ export const supabaseQueries = {
           .eq("role", "student");
 
         if (error) throw error;
-        return (data || []).map(normalizeProfileSchool).filter(Boolean);
+        return (data || []).map(normalizeProfileSchool).filter(
+          (profile): profile is ProfileWithSchoolName => profile !== null,
+        );
       } catch (error) {
         console.error("[supabaseQueries] Failed to get all profiles:", error);
         return [];
@@ -145,7 +147,9 @@ export const supabaseQueries = {
           .eq("role", "student");
 
         if (error) throw error;
-        return (data || []).map(normalizeProfileSchool).filter(Boolean);
+        return (data || []).map(normalizeProfileSchool).filter(
+          (profile): profile is ProfileWithSchoolName => profile !== null,
+        );
       } catch (error) {
         console.error(
           "[supabaseQueries] Failed to get profiles by role:",
@@ -500,11 +504,21 @@ export const supabaseQueries = {
       if (!userId) return [];
 
       try {
+        const canonical = await supabase
+          .from("submissions")
+          .select("*, missions(*)")
+          .eq("user_id", userId)
+          .order("updated_at", { ascending: false });
+
+        if (!canonical.error) {
+          return canonical.data || [];
+        }
+
         const { data, error } = await supabase
           .from("mission_submissions")
           .select("*, missions(*)")
           .eq("user_id", userId)
-          .order("created_at", { ascending: false });
+          .order("updated_at", { ascending: false });
 
         if (error) throw error;
         return data || [];
@@ -600,14 +614,109 @@ export const supabaseQueries = {
       }
 
       try {
+        const payload = {
+          user_id: submission.user_id,
+          mission_id: submission.mission_id,
+          status: "in_progress",
+          updated_at: new Date().toISOString(),
+        };
+
         const { data, error } = await supabase
-          .from("mission_submissions")
-          .insert(submission)
+          .from("submissions")
+          .upsert(payload, { onConflict: "user_id,mission_id" })
           .select()
           .single();
 
-        if (error) throw error;
-        return data;
+        const canonicalNotNullSubmittedAt =
+          !!error &&
+          /submitted_at/i.test(String(error.message ?? "")) &&
+          /not-null|null value/i.test(String(error.message ?? ""));
+
+        const canonicalInvalidStatus =
+          !!error &&
+          /status/i.test(String(error.message ?? "")) &&
+          /(constraint|check)/i.test(String(error.message ?? ""));
+
+        if (canonicalNotNullSubmittedAt) {
+          const compat = await supabase
+            .from("submissions")
+            .upsert(
+              { ...payload, submitted_at: new Date().toISOString() },
+              { onConflict: "user_id,mission_id" },
+            )
+            .select()
+            .single();
+
+          if (!compat.error) return compat.data;
+        }
+
+        if (canonicalInvalidStatus) {
+          const compat = await supabase
+            .from("submissions")
+            .upsert(
+              {
+                ...payload,
+                status: "pending",
+                submitted_at: new Date().toISOString(),
+              },
+              { onConflict: "user_id,mission_id" },
+            )
+            .select()
+            .single();
+
+          if (!compat.error) return compat.data;
+        }
+
+        if (!error) return data;
+
+        const legacy = await supabase
+          .from("mission_submissions")
+          .upsert(payload, { onConflict: "user_id,mission_id" })
+          .select()
+          .single();
+
+        const legacyNotNullSubmittedAt =
+          !!legacy.error &&
+          /submitted_at/i.test(String(legacy.error.message ?? "")) &&
+          /not-null|null value/i.test(String(legacy.error.message ?? ""));
+
+        const legacyInvalidStatus =
+          !!legacy.error &&
+          /status/i.test(String(legacy.error.message ?? "")) &&
+          /(constraint|check)/i.test(String(legacy.error.message ?? ""));
+
+        if (legacyNotNullSubmittedAt) {
+          const compatLegacy = await supabase
+            .from("mission_submissions")
+            .upsert(
+              { ...payload, submitted_at: new Date().toISOString() },
+              { onConflict: "user_id,mission_id" },
+            )
+            .select()
+            .single();
+
+          if (!compatLegacy.error) return compatLegacy.data;
+        }
+
+        if (legacyInvalidStatus) {
+          const compatLegacy = await supabase
+            .from("mission_submissions")
+            .upsert(
+              {
+                ...payload,
+                status: "pending",
+                submitted_at: new Date().toISOString(),
+              },
+              { onConflict: "user_id,mission_id" },
+            )
+            .select()
+            .single();
+
+          if (!compatLegacy.error) return compatLegacy.data;
+        }
+
+        if (legacy.error) throw legacy.error;
+        return legacy.data;
       } catch (error) {
         console.error("[supabaseQueries] Failed to create submission:", error);
         throw error;
@@ -653,14 +762,45 @@ export const supabaseQueries = {
       }
 
       try {
-        return this.update(submissionId, {
-          status: "submitted",
-          photo_url: photoUrl,
-          notes: notes || "",
-          location_lat: coords?.lat,
-          location_lng: coords?.lng,
-          submitted_at: new Date().toISOString(),
-        });
+        const rpcAttempts = [
+          () =>
+            supabase.rpc("submit_mission_proof", {
+              p_submission_id: submissionId,
+              p_photo_url: photoUrl,
+              p_notes: notes || "",
+              p_latitude: coords?.lat ?? null,
+              p_longitude: coords?.lng ?? null,
+            }),
+          () =>
+            supabase.rpc("submit_mission_proof", {
+              submission_id: submissionId,
+              photo_url: photoUrl,
+              notes: notes || "",
+              latitude: coords?.lat ?? null,
+              longitude: coords?.lng ?? null,
+            }),
+          () =>
+            supabase.rpc("submit_proof_for_submission", {
+              p_submission_id: submissionId,
+              p_photo_url: photoUrl,
+              p_notes: notes || "",
+              p_latitude: coords?.lat ?? null,
+              p_longitude: coords?.lng ?? null,
+            }),
+        ];
+
+        for (const runRpc of rpcAttempts) {
+          const { data, error } = await runRpc();
+          if (error) continue;
+          if (Array.isArray(data)) {
+            return data[0] || null;
+          }
+          return data || null;
+        }
+
+        throw new Error(
+          "Proof submission RPC failed. Mission status is not updated.",
+        );
       } catch (error) {
         console.error("[supabaseQueries] Failed to submit proof:", error);
         throw error;
@@ -1175,7 +1315,7 @@ export const supabaseQueries = {
           .eq("user_id", userId);
 
         if (error) throw error;
-        return data?.map((ub) => ub.badges).filter(Boolean) || [];
+        return data?.map((ub: any) => ub.badges).filter(Boolean) || [];
       } catch (error) {
         console.error("[supabaseQueries] Failed to get user badges:", error);
         return [];

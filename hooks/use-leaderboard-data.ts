@@ -1,8 +1,7 @@
-import { supabase } from "@/integrations/supabase/client";
+import { supabase } from "@/lib/supabase/client";
 import { supabaseQueries } from "@/integrations/supabase/queries";
-import { getLevelForPoints } from "@/lib/types";
 import { useQuery } from "@tanstack/react-query";
-import { useAuth } from "./useAuth";
+import { useAuth } from "./use-auth";
 
 export type TimePeriod = "all_time" | "this_week" | "this_month";
 export type LeaderboardScope = "global" | "my_school";
@@ -85,6 +84,14 @@ function getStartOfMonth(): string {
  */
 function normalizeSchoolName(name?: string | null): string {
   return (name || "").trim().toLowerCase();
+}
+
+function getLevelForPoints(points: number): { title: string } {
+  if (points >= 2000) return { title: "Eco Legend" };
+  if (points >= 1200) return { title: "Green Guardian" };
+  if (points >= 600) return { title: "Planet Protector" };
+  if (points >= 250) return { title: "Eco Explorer" };
+  return { title: "Seed Starter" };
 }
 
 /**
@@ -384,7 +391,7 @@ export function useTeacherLeaderboardData(period: TimePeriod = "all_time") {
         }
 
         const submissionsByStudent = new Map<string, number>();
-        (submissions || []).forEach((sub) => {
+        (submissions || []).forEach((sub: any) => {
           if (sub.user_id) {
             submissionsByStudent.set(
               sub.user_id,
@@ -415,7 +422,7 @@ export function useTeacherLeaderboardData(period: TimePeriod = "all_time") {
             throw pointsError;
           }
 
-          (periodPoints || []).forEach((row) => {
+          (periodPoints || []).forEach((row: any) => {
             if (row.user_id && typeof row.points_earned === "number") {
               pointsForPeriod.set(
                 row.user_id,
@@ -477,7 +484,7 @@ export function useTeacherLeaderboardData(period: TimePeriod = "all_time") {
         }
 
         const byDate: Record<string, number> = {};
-        (weeklyRows || []).forEach((row) => {
+        (weeklyRows || []).forEach((row: any) => {
           if (row.date && typeof row.points_earned === "number") {
             byDate[row.date] = (byDate[row.date] ?? 0) + row.points_earned;
           }

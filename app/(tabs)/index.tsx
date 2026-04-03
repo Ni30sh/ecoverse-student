@@ -1,8 +1,17 @@
 import { useQueryClient } from "@tanstack/react-query";
 import * as Haptics from "expo-haptics";
 import { LinearGradient } from "expo-linear-gradient";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
+import Svg, {
+  Circle,
+  Defs,
+  Line,
+  LinearGradient as SvgGradient,
+  Path,
+  Stop,
+  Text as SvgText,
+} from "react-native-svg";
 import Animated, { FadeInDown } from "react-native-reanimated";
 
 import EcosystemViewer from "@/components/game/EcosystemViewer";
@@ -25,6 +34,21 @@ type DashboardStats = {
   level: number;
   rank: number;
 };
+
+type EcosystemBand = {
+  label: string;
+  min: number;
+  maxExclusive: number | null;
+};
+
+const ECOSYSTEM_BANDS: EcosystemBand[] = [
+  { label: "Barren", min: 0, maxExclusive: 200 },
+  { label: "Sprouting", min: 200, maxExclusive: 600 },
+  { label: "Growing", min: 600, maxExclusive: 1200 },
+  { label: "Thriving", min: 1200, maxExclusive: 2500 },
+  { label: "Flourishing", min: 2500, maxExclusive: 10000 },
+  { label: "Eco Utopia", min: 10000, maxExclusive: null },
+];
 
 function extractNumber(value: unknown, defaultVal = 0): number {
   if (typeof value === "number") {
@@ -63,11 +87,74 @@ function getDifficultyBadge(mission: MissionRecord, index: number) {
   return index === 0 ? "easy" : index === 1 ? "medium" : "hard";
 }
 
+function getWeeklyChartData(pointsRows: Record<string, unknown>[]) {
+  const fallbackLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const rows = pointsRows.slice(0, 7);
+
+  const normalized = rows.map((entry, index) => {
+    const dateRaw = String(entry.date ?? "").trim();
+    const date = dateRaw ? new Date(dateRaw) : null;
+    const label =
+      date && !Number.isNaN(date.getTime())
+        ? date.toLocaleDateString("en-US", { weekday: "short" })
+        : fallbackLabels[index] ?? `D${index + 1}`;
+
+    return {
+      label,
+      value: extractNumber(entry.points ?? entry.points_earned ?? 0, 0),
+    };
+  });
+
+  if (normalized.length === 0) {
+    return fallbackLabels.map((label) => ({ label, value: 0 }));
+  }
+
+  if (normalized.length < 7) {
+    const remaining = 7 - normalized.length;
+    for (let i = 0; i < remaining; i += 1) {
+      normalized.push({
+        label: fallbackLabels[normalized.length] ?? `D${normalized.length + 1}`,
+        value: 0,
+      });
+    }
+  }
+
+  return normalized;
+}
+
+function getEcosystemBand(ecoPoints: number) {
+  const safePoints = Math.max(0, ecoPoints);
+  const band =
+    ECOSYSTEM_BANDS.find(
+      (item) =>
+        safePoints >= item.min &&
+        (item.maxExclusive === null || safePoints < item.maxExclusive),
+    ) ?? ECOSYSTEM_BANDS[0];
+
+  const nextTarget = band.maxExclusive;
+  const segmentTotal =
+    nextTarget === null ? 1 : Math.max(1, nextTarget - band.min);
+  const segmentValue =
+    nextTarget === null
+      ? segmentTotal
+      : Math.max(0, Math.min(segmentTotal, safePoints - band.min));
+  const progressPercent = Math.round((segmentValue / segmentTotal) * 100);
+
+  return {
+    ...band,
+    nextTarget,
+    progressPercent,
+  };
+}
+
 export default function HomeScreen() {
   const { user, signOut } = useAuth();
   const { resolvedScheme } = useAppTheme();
   const { showToast } = useToast();
   const queryClient = useQueryClient();
+  const [acceptingMissionId, setAcceptingMissionId] = useState<string | null>(
+    null,
+  );
   const palette = Colors[resolvedScheme];
   const {
     profile,
@@ -77,6 +164,7 @@ export default function HomeScreen() {
     submissions,
     weeklyPoints,
     isLoading,
+    acceptMission,
     refreshProfile,
   } = useDashboardData();
 
@@ -120,6 +208,29 @@ export default function HomeScreen() {
   const userName = String(
     profile?.name ?? user?.email?.split("@")[0] ?? "Raj",
   ).split(" ")[0];
+  const ecosystemBand = getEcosystemBand(stats.ecoPoints);
+  const weeklyChartData = getWeeklyChartData(dailyPoints);
+  const weeklyMax = Math.max(10, ...weeklyChartData.map((item) => item.value));
+
+  const chartWidth = 280;
+  const chartPaddingX = 16;
+  const chartTop = 14;
+  const chartBottom = 86;
+  const chartUsableHeight = chartBottom - chartTop;
+  const chartStepX =
+    (chartWidth - chartPaddingX * 2) /
+    Math.max(1, weeklyChartData.length - 1);
+
+  const chartPoints = weeklyChartData.map((item, index) => {
+    const x = chartPaddingX + index * chartStepX;
+    const y = chartBottom - (item.value / weeklyMax) * chartUsableHeight;
+    return { x, y, label: item.label, value: item.value };
+  });
+
+  const linePath = chartPoints
+    .map((point, index) => `${index === 0 ? "M" : "L"}${point.x},${point.y}`)
+    .join(" ");
+  const areaPath = `${linePath} L${chartPoints[chartPoints.length - 1]?.x ?? chartWidth - chartPaddingX},${chartBottom} L${chartPoints[0]?.x ?? chartPaddingX},${chartBottom} Z`;
   const quests = missions.slice(0, 3);
   const activities = submissions.slice(0, 4);
 
@@ -141,7 +252,7 @@ export default function HomeScreen() {
             <View style={styles.heroTop}>
               <View>
                 <ThemedText style={styles.heroTitle}>
-                  {getGreeting()}, {userName} ??
+                  {getGreeting()}, {userName} 🌿
                 </ThemedText>
                 <ThemedText
                   style={[styles.heroSubtitle, { color: palette.muted }]}
@@ -222,16 +333,48 @@ export default function HomeScreen() {
                   <ThemedText type="subtitle" style={styles.sectionTitle}>
                     Ecosystem Growth
                   </ThemedText>
-                  <ThemedText
-                    style={[styles.viewAll, { color: palette.primary }]}
-                  >
-                    {stats.ecoPoints} pts
-                  </ThemedText>
+                  <View style={styles.ecosystemStageBadge}>
+                    <ThemedText style={styles.ecosystemStageText}>
+                      {ecosystemBand.label}
+                    </ThemedText>
+                  </View>
                 </View>
-                <EcosystemViewer
-                  ecoPoints={stats.ecoPoints}
-                  darkWrapper={resolvedScheme === "dark"}
-                />
+                <View style={styles.ecosystemFrame}>
+                  <EcosystemViewer
+                    ecoPoints={stats.ecoPoints}
+                    darkWrapper={resolvedScheme === "dark"}
+                  />
+                </View>
+                <View style={styles.ecosystemMetaRow}>
+                  <View style={styles.ecosystemMetaItem}>
+                    <ThemedText style={styles.ecosystemMetaLabel}>Points</ThemedText>
+                    <ThemedText style={styles.ecosystemMetaValue}>
+                      {stats.ecoPoints}
+                    </ThemedText>
+                  </View>
+                  <View style={styles.ecosystemMetaItem}>
+                    <ThemedText style={styles.ecosystemMetaLabel}>Next Milestone</ThemedText>
+                    <ThemedText style={styles.ecosystemMetaValue}>
+                      {ecosystemBand.nextTarget === null
+                        ? "Max reached"
+                        : `${ecosystemBand.nextTarget} pts`}
+                    </ThemedText>
+                  </View>
+                  <View style={styles.ecosystemMetaItem}>
+                    <ThemedText style={styles.ecosystemMetaLabel}>Completion</ThemedText>
+                    <ThemedText style={styles.ecosystemMetaValue}>
+                      {ecosystemBand.progressPercent}%
+                    </ThemedText>
+                  </View>
+                </View>
+                <View style={styles.ecosystemProgressTrack}>
+                  <View
+                    style={[
+                      styles.ecosystemProgressFill,
+                      { width: `${ecosystemBand.progressPercent}%` },
+                    ]}
+                  />
+                </View>
               </GlassCard>
             </Animated.View>
 
@@ -276,11 +419,18 @@ export default function HomeScreen() {
               <View style={styles.questList}>
                 {quests.map((mission, index) => {
                   const difficulty = getDifficultyBadge(mission, index);
+                  const missionId = String(mission.id ?? "").trim();
+                  const isAccepting = acceptingMissionId === missionId;
 
                   return (
                     <GlassCard
                       key={`${String(mission.id ?? index)}-${index}`}
-                      style={styles.questCard}
+                      style={[
+                        styles.questCard,
+                        acceptingMissionId && !isAccepting
+                          ? styles.questCardDimmed
+                          : null,
+                      ]}
                     >
                       <LinearGradient
                         colors={["#f0fdf4", "#dcfce7"]}
@@ -305,13 +455,25 @@ export default function HomeScreen() {
                         ).slice(0, 72)}
                       </ThemedText>
                       <PremiumButton
-                        label="Accept"
-                        onPress={() => {
+                        label={isAccepting ? "Accepting..." : "Accept"}
+                        onPress={async () => {
                           void Haptics.impactAsync(
                             Haptics.ImpactFeedbackStyle.Medium,
                           );
-                          showToast("Mission accepted", "success");
+                          if (!missionId) {
+                            showToast("Mission is missing an id.", "error");
+                            return;
+                          }
+                          setAcceptingMissionId(missionId);
+                          try {
+                            await acceptMission.mutateAsync(missionId);
+                          } finally {
+                            setAcceptingMissionId((current) =>
+                              current === missionId ? null : current,
+                            );
+                          }
                         }}
+                        disabled={isAccepting}
                         style={styles.questButton}
                       />
                     </GlassCard>
@@ -333,7 +495,7 @@ export default function HomeScreen() {
                     style={styles.rankRow}
                   >
                     <ThemedText style={styles.rankIcon}>
-                      {index === 0 ? "??" : index === 1 ? "??" : "??"}
+                      {index === 0 ? "🥇" : index === 1 ? "🥈" : "🥉"}
                     </ThemedText>
                     <ThemedText style={styles.rankName}>
                       {String(entry.full_name ?? "Student")}
@@ -359,25 +521,64 @@ export default function HomeScreen() {
                 <ThemedText type="subtitle" style={styles.miniTitle}>
                   Weekly Chart
                 </ThemedText>
-                <View style={styles.chartRow}>
-                  {(dailyPoints.length > 0
-                    ? dailyPoints.slice(0, 7)
-                    : Array.from({ length: 7 })
-                  ).map((entry, i) => {
-                    const value = entry
-                      ? extractNumber(
-                          (entry as Record<string, unknown>).points,
-                          0,
-                        )
-                      : 0;
-                    const height = Math.max(10, Math.min(48, value / 2 || 12));
-                    return (
-                      <View
-                        key={`bar-${i}`}
-                        style={[styles.chartBar, { height }]}
+                <View style={styles.weeklyChartWrap}>
+                  <Svg viewBox="0 0 280 120" width="100%" height={120}>
+                    <Defs>
+                      <SvgGradient id="weeklyArea" x1="0" y1="0" x2="0" y2="1">
+                        <Stop offset="0%" stopColor="#22C55E" stopOpacity="0.35" />
+                        <Stop offset="100%" stopColor="#22C55E" stopOpacity="0.03" />
+                      </SvgGradient>
+                    </Defs>
+
+                    {[0, 1, 2].map((row) => {
+                      const y = chartTop + (chartUsableHeight / 2) * row;
+                      return (
+                        <Line
+                          key={`grid-${row}`}
+                          x1={chartPaddingX}
+                          y1={y}
+                          x2={chartWidth - chartPaddingX}
+                          y2={y}
+                          stroke="rgba(148,163,184,0.25)"
+                          strokeWidth={1}
+                          strokeDasharray="3 4"
+                        />
+                      );
+                    })}
+
+                    <Path d={areaPath} fill="url(#weeklyArea)" />
+                    <Path
+                      d={linePath}
+                      fill="none"
+                      stroke="#16A34A"
+                      strokeWidth={3}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+
+                    {chartPoints.map((point, index) => (
+                      <Circle
+                        key={`dot-${index}`}
+                        cx={point.x}
+                        cy={point.y}
+                        r={4}
+                        fill="#16A34A"
                       />
-                    );
-                  })}
+                    ))}
+
+                    {chartPoints.map((point, index) => (
+                      <SvgText
+                        key={`label-${index}`}
+                        x={point.x}
+                        y={106}
+                        fontSize={10}
+                        fill="#64748B"
+                        textAnchor="middle"
+                      >
+                        {point.label}
+                      </SvgText>
+                    ))}
+                  </Svg>
                 </View>
               </GlassCard>
 
@@ -392,15 +593,24 @@ export default function HomeScreen() {
                     Complete a mission to start timeline.
                   </ThemedText>
                 ) : (
-                  activities.map((item, index) => (
-                    <View key={`activity-${index}`} style={styles.activityRow}>
-                      <View style={styles.activityDot} />
-                      <ThemedText style={styles.activityText}>
-                        {String(item.status ?? "progress").toUpperCase()}{" "}
-                        {String(item.updated_at ?? "").slice(0, 10)}
-                      </ThemedText>
-                    </View>
-                  ))
+                  activities.map((item, index) => {
+                    const statusMap: Record<string, string> = {
+                      "in_progress": "Started (not submitted)",
+                      "pending": "Submitted for teacher review",
+                      "approved": "Completed ✓",
+                      "rejected": "Needs revision",
+                    };
+                    const statusLabel = statusMap[String(item.status ?? "").toLowerCase()] ?? String(item.status ?? "progress").toUpperCase();
+                    return (
+                      <View key={`activity-${index}`} style={styles.activityRow}>
+                        <View style={styles.activityDot} />
+                        <ThemedText style={styles.activityText}>
+                          {statusLabel}{" "}
+                          {String(item.updated_at ?? "").slice(0, 10)}
+                        </ThemedText>
+                      </View>
+                    );
+                  })
                 )}
               </GlassCard>
             </Animated.View>
@@ -419,13 +629,13 @@ export default function HomeScreen() {
                 </View>
                 <View style={styles.badgesRow}>
                   <View style={styles.badgePill}>
-                    <ThemedText>?? First Steps</ThemedText>
+                    <ThemedText>🌱 First Steps</ThemedText>
                   </View>
                   <View style={styles.badgePill}>
-                    <ThemedText>?? On Fire</ThemedText>
+                    <ThemedText>🔥 On Fire</ThemedText>
                   </View>
                   <View style={styles.badgePill}>
-                    <ThemedText>?? Water Guard</ThemedText>
+                    <ThemedText>💧 Water Guard</ThemedText>
                   </View>
                 </View>
               </GlassCard>
@@ -524,8 +734,61 @@ const styles = StyleSheet.create({
     padding: 10,
   },
   ecosystemCard: {
-    padding: 10,
+    padding: 12,
+    gap: 12,
+  },
+  ecosystemStageBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "rgba(22,163,74,0.14)",
+  },
+  ecosystemStageText: {
+    color: "#166534",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  ecosystemFrame: {
+    borderRadius: 16,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.08)",
+    backgroundColor: "rgba(255,255,255,0.5)",
+  },
+  ecosystemMetaRow: {
+    flexDirection: "row",
     gap: 8,
+  },
+  ecosystemMetaItem: {
+    flex: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: "rgba(22,163,74,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(22,163,74,0.14)",
+  },
+  ecosystemMetaLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#166534",
+  },
+  ecosystemMetaValue: {
+    marginTop: 4,
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#0f172a",
+  },
+  ecosystemProgressTrack: {
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: "rgba(148,163,184,0.25)",
+    overflow: "hidden",
+  },
+  ecosystemProgressFill: {
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: "#16A34A",
   },
   challengeHeader: {
     borderRadius: 16,
@@ -578,6 +841,9 @@ const styles = StyleSheet.create({
   },
   questCard: {
     gap: 10,
+  },
+  questCardDimmed: {
+    opacity: 0.55,
   },
   questHeader: {
     borderRadius: 14,
@@ -645,16 +911,14 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "800",
   },
-  chartRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    justifyContent: "space-between",
-    height: 56,
-  },
-  chartBar: {
-    width: 12,
-    borderRadius: 8,
-    backgroundColor: "#22C55E",
+  weeklyChartWrap: {
+    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingTop: 4,
+    paddingBottom: 2,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.2)",
+    backgroundColor: "rgba(248,250,252,0.7)",
   },
   activityRow: {
     flexDirection: "row",

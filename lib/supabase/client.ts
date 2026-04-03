@@ -7,6 +7,7 @@ const supabaseUrl =
 const supabaseAnonKey =
   process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ??
   process.env.VITE_SUPABASE_ANON_KEY;
+const EXPECTED_PROJECT_REF = "vzwvnhgorvqnwluzxtkk";
 
 if (!supabaseUrl || !supabaseAnonKey) {
   throw new Error("Missing Supabase environment variables.");
@@ -57,3 +58,13 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     detectSessionInUrl: false,
   },
 });
+
+if (__DEV__) {
+  const refMatch = supabaseUrl.match(/^https:\/\/([a-z0-9-]+)\.supabase\.co/i);
+  const activeRef = refMatch?.[1] ?? "unknown";
+  console.log("[supabase-project-check] mobile target", {
+    expectedRef: EXPECTED_PROJECT_REF,
+    activeRef,
+    matches: activeRef === EXPECTED_PROJECT_REF,
+  });
+}

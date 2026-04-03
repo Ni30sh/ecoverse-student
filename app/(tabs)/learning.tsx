@@ -1,7 +1,7 @@
 import { useFocusEffect } from "@react-navigation/native";
 import { useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -12,6 +12,7 @@ import {
 
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
+import { useLearningTopics } from "@/lib/hooks/use-learning-hub-data";
 import { invalidateStudentCache } from "@/lib/query/invalidate-student-cache";
 import { supabase } from "@/lib/supabase/client";
 import { supabaseQueries } from "@/lib/supabase/supabase-queries";
@@ -19,6 +20,7 @@ import { getErrorMessage, retryQuery } from "@/lib/utils/resilience";
 import { useAuth } from "@/providers/auth-provider";
 
 type LessonRecord = Record<string, unknown>;
+type TopicOption = { id: string; title: string };
 
 function lessonId(lesson: LessonRecord) {
   return String(lesson.id ?? "");
@@ -28,14 +30,60 @@ function lessonTitle(lesson: LessonRecord) {
   return String(lesson.title ?? lesson.name ?? "Untitled Lesson");
 }
 
-function lessonTopic(lesson: LessonRecord) {
-  return String(lesson.topic ?? lesson.category ?? "general");
+function lessonTopicId(lesson: LessonRecord) {
+  return String(lesson.topic_id ?? "").trim();
+}
+
+function lessonTopicSlug(lesson: LessonRecord) {
+  return String(lesson.topic ?? lesson.category ?? "").trim();
+}
+
+function normalizeTopicLabel(topicKey: string) {
+  const slug = String(topicKey ?? "").trim().toLowerCase();
+  if (!slug) {
+    return "Uncategorized";
+  }
+
+  const preset: Record<string, string> = {
+    biodiversity: "Biodiversity",
+    climate_change: "Climate Change",
+    energy: "Renewable Energy",
+    pollution: "Pollution & Waste",
+    waste: "Waste Management",
+    water: "Water Conservation",
+  };
+
+  if (preset[slug]) {
+    return preset[slug];
+  }
+
+  return slug
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function topicKeyForLesson(lesson: LessonRecord) {
+  const slug = lessonTopicSlug(lesson);
+  if (slug) {
+    return `slug:${slug}`;
+  }
+
+  const topicId = lessonTopicId(lesson);
+  if (topicId) {
+    return `id:${topicId}`;
+  }
+
+  return "uncategorized";
 }
 
 export default function LearningScreen() {
   const { user } = useAuth();
+  const { topics: learningTopics } = useLearningTopics();
   const queryClient = useQueryClient();
   const [loading, setLoading] = useState(true);
+  const [allLessons, setAllLessons] = useState<LessonRecord[]>([]);
   const [lessons, setLessons] = useState<LessonRecord[]>([]);
   const [topicFilter, setTopicFilter] = useState("all");
   const [errorMessage, setErrorMessage] = useState("");
@@ -43,32 +91,43 @@ export default function LearningScreen() {
 
   const loadLessons = useCallback(async () => {
     setErrorMessage("");
-
-    const response =
-      topicFilter === "all"
-        ? await retryQuery(() => supabaseQueries.lessons.getAll(), {
-            operationName: "learning_lessons_getAll",
-            context: { screen: "learning" },
-          })
-        : await retryQuery(
-            () => supabaseQueries.lessons.getByTopic(topicFilter),
-            {
-              operationName: "learning_lessons_getByTopic",
-              context: { screen: "learning", topicFilter },
-            },
-          );
+    const response = await retryQuery(() => supabaseQueries.lessons.getAll(), {
+      operationName: "learning_lessons_getAll",
+      context: { screen: "learning" },
+    });
 
     if (response.error) {
       setErrorMessage(
         getErrorMessage(response.error, "Failed to load lessons."),
       );
+      setAllLessons([]);
+      setLessons([]);
       setLoading(false);
       return;
     }
 
-    setLessons((response.data ?? []) as LessonRecord[]);
+    const fetchedLessons = (response.data ?? []) as LessonRecord[];
+    setAllLessons(fetchedLessons);
+
+    const filteredLessons =
+      topicFilter === "all"
+        ? fetchedLessons
+        : fetchedLessons.filter(
+            (lesson) => topicKeyForLesson(lesson) === topicFilter,
+          );
+
+    setLessons(filteredLessons);
     setLoading(false);
   }, [topicFilter]);
+
+  useEffect(() => {
+    if (topicFilter === "all") {
+      setLessons(allLessons);
+      return;
+    }
+
+    setLessons(allLessons.filter((lesson) => topicKeyForLesson(lesson) === topicFilter));
+  }, [allLessons, topicFilter]);
 
   useFocusEffect(
     useCallback(() => {
@@ -77,13 +136,58 @@ export default function LearningScreen() {
     }, [loadLessons]),
   );
 
-  const topics = useMemo(() => {
-    const values = new Set<string>();
-    for (const lesson of lessons) {
-      values.add(lessonTopic(lesson));
+  const topicOptions = useMemo<TopicOption[]>(() => {
+    const seen = new Set<string>();
+
+    const fromLessonSlugs = (allLessons ?? [])
+      .map((lesson) => {
+        const key = topicKeyForLesson(lesson);
+        if (key === "uncategorized" || seen.has(key)) {
+          return null;
+        }
+        seen.add(key);
+
+        if (key.startsWith("slug:")) {
+          return {
+            id: key,
+            title: normalizeTopicLabel(key.slice(5)),
+          };
+        }
+
+        return null;
+      })
+      .filter((topic): topic is TopicOption => Boolean(topic));
+
+    const fromDb = (learningTopics ?? [])
+      .map((topic) => {
+        const id = String(topic.id ?? "").trim();
+        const title = String(topic.title ?? "").trim();
+        if (!id || !title) {
+          return null;
+        }
+        const key = `id:${id}`;
+        if (seen.has(key)) {
+          return null;
+        }
+        seen.add(key);
+        return { id: key, title };
+      })
+      .filter((topic): topic is TopicOption => Boolean(topic));
+
+    return [{ id: "all", title: "all" }, ...fromLessonSlugs, ...fromDb];
+  }, [allLessons, learningTopics]);
+
+  const topicTitleById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const topic of learningTopics ?? []) {
+      const id = String(topic.id ?? "").trim();
+      const title = String(topic.title ?? "").trim();
+      if (id && title) {
+        map.set(id, title);
+      }
     }
-    return ["all", ...Array.from(values)];
-  }, [lessons]);
+    return map;
+  }, [learningTopics]);
 
   const completeLesson = async (lesson: LessonRecord) => {
     if (!user) {
@@ -171,24 +275,26 @@ export default function LearningScreen() {
       </ThemedText>
 
       <ThemedView style={styles.topicRow}>
-        {topics.map((topic) => (
+        {topicOptions.map((topic) => (
           <Pressable
-            key={topic}
+            key={topic.id}
             onPress={() => {
-              setTopicFilter(topic);
+              setTopicFilter(topic.id);
               setLoading(true);
             }}
             style={[
               styles.topicChip,
-              topicFilter === topic ? styles.topicChipActive : null,
+              topicFilter === topic.id ? styles.topicChipActive : null,
             ]}
           >
             <ThemedText
               style={
-                topicFilter === topic ? styles.topicChipLabelActive : undefined
+                topicFilter === topic.id
+                  ? styles.topicChipLabelActive
+                  : undefined
               }
             >
-              {topic}
+              {topic.title}
             </ThemedText>
           </Pressable>
         ))}
@@ -221,11 +327,15 @@ export default function LearningScreen() {
       {lessons.map((lesson) => {
         const id = lessonId(lesson);
         const isBusy = busyLessonId === id;
+        const topicKey = topicKeyForLesson(lesson);
+        const topicLabel = topicKey.startsWith("slug:")
+          ? normalizeTopicLabel(topicKey.slice(5))
+          : topicTitleById.get(topicKey.replace(/^id:/, "")) ?? "Uncategorized";
 
         return (
           <ThemedView key={id || lessonTitle(lesson)} style={styles.card}>
             <ThemedText type="subtitle">{lessonTitle(lesson)}</ThemedText>
-            <ThemedText>Topic: {lessonTopic(lesson)}</ThemedText>
+            <ThemedText>Topic: {topicLabel}</ThemedText>
             <ThemedText>
               {String(
                 lesson.description ?? lesson.content ?? "No lesson text.",

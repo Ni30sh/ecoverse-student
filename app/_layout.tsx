@@ -12,6 +12,7 @@ import { AppErrorBoundary } from "@/components/app-error-boundary";
 import { ToastProvider } from "@/components/ui/toast-provider";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { queryClient } from "@/lib/query/query-client";
+import { SupabaseDebugOnLaunch } from "@/mobile-debug/SupabaseProjectCheckSnippet";
 import { AuthProvider } from "@/providers/auth-provider";
 import { AppThemeProvider } from "@/providers/theme-provider";
 
@@ -39,6 +40,7 @@ function RootLayoutNav() {
           <ThemeProvider
             value={colorScheme === "dark" ? DarkTheme : DefaultTheme}
           >
+            <SupabaseDebugOnLaunch />
             <Stack>
               <Stack.Screen name="login" options={{ headerShown: false }} />
               <Stack.Screen name="signup" options={{ headerShown: false }} />

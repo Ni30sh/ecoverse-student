@@ -19,14 +19,6 @@ type MissionSubmissionCreatePayload = {
   status: "in_progress" | "submitted" | "approved" | "rejected";
 };
 
-type MissionProofRpcPayload = {
-  submission_id: string;
-  photo_url: string;
-  notes: string;
-  latitude?: number;
-  longitude?: number;
-};
-
 type MissionStepSubmissionPayload = {
   user_id: string;
   mission_step_id: string;
@@ -65,6 +57,11 @@ type MissionProofUploadResult = {
   publicUrl: string;
 };
 
+type SchoolContext = {
+  schoolId: string;
+  schoolName: string;
+};
+
 const MOCK_MISSIONS: GenericRecord[] = [
   {
     id: "mock-mission-1",
@@ -93,6 +90,25 @@ const MOCK_MISSIONS: GenericRecord[] = [
     requires_teacher_approval: true,
   },
 ];
+
+const UUID_PATTERN =
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
+
+const TEACHER_FALLBACK_LABEL = "your teacher";
+const MISSION_SUBMISSION_DEBUG = Boolean(
+  (globalThis as { __DEV__?: boolean }).__DEV__,
+);
+
+function debugMissionSubmission(
+  stage: string,
+  details?: Record<string, unknown>,
+) {
+  if (!MISSION_SUBMISSION_DEBUG) {
+    return;
+  }
+
+  console.log(`[mission-submission-debug] ${stage}`, details ?? {});
+}
 
 function extensionFromMimeType(mimeType?: string) {
   if (!mimeType || !mimeType.includes("/")) {
@@ -303,6 +319,238 @@ function toInteger(value: unknown, fallback = 0) {
 
 function normalizeTextInput(value: unknown) {
   return String(value ?? "").trim();
+}
+
+function normalizeSchoolNameForMatch(value: unknown) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function extractUuidTokens(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) {
+    return [] as string[];
+  }
+
+  const matches = value.match(UUID_PATTERN) ?? [];
+  return matches.map((id) => id.toLowerCase());
+}
+
+function replaceReviewerIdsInText(
+  value: unknown,
+  nameById: Map<string, string>,
+) {
+  if (typeof value !== "string" || !value.trim()) {
+    return value;
+  }
+
+  return value.replace(UUID_PATTERN, (rawId) => {
+    const key = rawId.toLowerCase();
+    return nameById.get(key) ?? TEACHER_FALLBACK_LABEL;
+  });
+}
+
+async function resolveSchoolContextForUser(
+  userId: string,
+): Promise<QueryResult<SchoolContext>> {
+  try {
+    const normalizedUserId = String(userId ?? "").trim();
+    if (!normalizedUserId) {
+      return {
+        data: { schoolId: "", schoolName: "" },
+        error: null,
+      };
+    }
+
+    const studentLookup = await supabase
+      .from("students")
+      .select("school_id,school_name")
+      .eq("id", normalizedUserId)
+      .maybeSingle();
+
+    if (!studentLookup.error && studentLookup.data) {
+      const row = studentLookup.data as GenericRecord;
+      return {
+        data: {
+          schoolId: String(row.school_id ?? "").trim(),
+          schoolName: String(row.school_name ?? "").trim(),
+        },
+        error: null,
+      };
+    }
+
+    const profileLookup = await supabase
+      .from("profiles")
+      .select("school_id,school_name")
+      .or(`id.eq.${normalizedUserId},user_id.eq.${normalizedUserId}`)
+      .limit(1)
+      .maybeSingle();
+
+    if (!profileLookup.error && profileLookup.data) {
+      const row = profileLookup.data as GenericRecord;
+      return {
+        data: {
+          schoolId: String(row.school_id ?? "").trim(),
+          schoolName: String(row.school_name ?? "").trim(),
+        },
+        error: null,
+      };
+    }
+
+    return {
+      data: { schoolId: "", schoolName: "" },
+      error: studentLookup.error ?? profileLookup.error,
+    };
+  } catch (error) {
+    return { data: null, error: asError(error) };
+  }
+}
+
+async function resolveReviewerNameMapForStudent(
+  userId: string,
+  reviewerIds: string[],
+): Promise<QueryResult<Map<string, string>>> {
+  try {
+    const uniqueIds = Array.from(
+      new Set(
+        reviewerIds
+          .map((id) =>
+            String(id ?? "")
+              .trim()
+              .toLowerCase(),
+          )
+          .filter((id) => id.length > 0),
+      ),
+    );
+
+    if (uniqueIds.length === 0) {
+      return { data: new Map<string, string>(), error: null };
+    }
+
+    const schoolContext = await resolveSchoolContextForUser(userId);
+    if (schoolContext.error || !schoolContext.data) {
+      return {
+        data: new Map<string, string>(),
+        error: schoolContext.error,
+      };
+    }
+
+    const requesterSchoolId = String(schoolContext.data.schoolId ?? "").trim();
+    const requesterSchoolName = normalizeSchoolNameForMatch(
+      schoolContext.data.schoolName,
+    );
+
+    const profileLookup = await supabase
+      .from("profiles")
+      .select("id,full_name,name,email,role,school_id,school_name")
+      .in("id", uniqueIds);
+
+    if (profileLookup.error) {
+      return { data: new Map<string, string>(), error: profileLookup.error };
+    }
+
+    const names = new Map<string, string>();
+    for (const row of (profileLookup.data ?? []) as GenericRecord[]) {
+      const id = String(row.id ?? "")
+        .trim()
+        .toLowerCase();
+      if (!id) {
+        continue;
+      }
+
+      const role = String(row.role ?? "")
+        .trim()
+        .toLowerCase();
+      if (role && role !== "teacher" && role !== "admin") {
+        continue;
+      }
+
+      const teacherSchoolId = String(row.school_id ?? "").trim();
+      const teacherSchoolName = normalizeSchoolNameForMatch(row.school_name);
+
+      const sameSchoolById =
+        Boolean(requesterSchoolId) &&
+        Boolean(teacherSchoolId) &&
+        requesterSchoolId === teacherSchoolId;
+      const sameSchoolByName =
+        Boolean(requesterSchoolName) &&
+        Boolean(teacherSchoolName) &&
+        requesterSchoolName === teacherSchoolName;
+
+      if (!sameSchoolById && !sameSchoolByName) {
+        continue;
+      }
+
+      const displayName =
+        String(row.full_name ?? "").trim() ||
+        String(row.name ?? "").trim() ||
+        String(row.email ?? "").trim();
+      if (!displayName) {
+        continue;
+      }
+
+      names.set(id, displayName);
+    }
+
+    return { data: names, error: null };
+  } catch (error) {
+    return { data: null, error: asError(error) };
+  }
+}
+
+async function sanitizeNotificationsForStudent(
+  userId: string,
+  rows: GenericRecord[],
+): Promise<QueryResult<GenericRecord[]>> {
+  try {
+    if (rows.length === 0) {
+      return { data: [], error: null };
+    }
+
+    const reviewerIds = new Set<string>();
+    for (const row of rows) {
+      for (const token of extractUuidTokens(row.title)) {
+        reviewerIds.add(token);
+      }
+      for (const token of extractUuidTokens(row.body)) {
+        reviewerIds.add(token);
+      }
+      for (const token of extractUuidTokens(row.reviewed_by)) {
+        reviewerIds.add(token);
+      }
+    }
+
+    if (reviewerIds.size === 0) {
+      return { data: rows, error: null };
+    }
+
+    const nameMapResult = await resolveReviewerNameMapForStudent(
+      userId,
+      Array.from(reviewerIds),
+    );
+    if (nameMapResult.error || !nameMapResult.data) {
+      return { data: rows, error: null };
+    }
+    const nameMap = nameMapResult.data;
+
+    const sanitized = rows.map((row) => {
+      const reviewedByValue = String(row.reviewed_by ?? "").trim();
+      const reviewedByName = reviewedByValue
+        ? (nameMap.get(reviewedByValue.toLowerCase()) ?? TEACHER_FALLBACK_LABEL)
+        : "";
+
+      return {
+        ...row,
+        title: replaceReviewerIdsInText(row.title, nameMap),
+        body: replaceReviewerIdsInText(row.body, nameMap),
+        reviewed_by_name: reviewedByName || row.reviewed_by_name,
+      };
+    });
+
+    return { data: sanitized, error: null };
+  } catch (error) {
+    return { data: rows, error: null };
+  }
 }
 
 async function resolveActorUserId(
@@ -1304,24 +1552,6 @@ export const supabaseQueries = {
       missionId: string,
     ): Promise<QueryResult<GenericRecord>> {
       try {
-        const canonical = await supabase
-          .from("submissions")
-          .select("*")
-          .eq("user_id", userId)
-          .eq("mission_id", missionId)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (!canonical.error) {
-          return {
-            data: canonical.data
-              ? normalizeSubmissionRecord(canonical.data as GenericRecord)
-              : null,
-            error: null,
-          };
-        }
-
         const missionTable = await supabase
           .from("mission_submissions")
           .select("*")
@@ -1335,6 +1565,24 @@ export const supabaseQueries = {
           return {
             data: missionTable.data
               ? normalizeSubmissionRecord(missionTable.data as GenericRecord)
+              : null,
+            error: null,
+          };
+        }
+
+        const canonical = await supabase
+          .from("submissions")
+          .select("*")
+          .eq("user_id", userId)
+          .eq("mission_id", missionId)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!canonical.error) {
+          return {
+            data: canonical.data
+              ? normalizeSubmissionRecord(canonical.data as GenericRecord)
               : null,
             error: null,
           };
@@ -1359,16 +1607,16 @@ export const supabaseQueries = {
         }
 
         if (
-          isMissingRelationError(canonical.error) &&
           isMissingRelationError(missionTable.error) &&
-          isMissingRelationError(studentFallback.error)
+          isMissingRelationError(studentFallback.error) &&
+          isMissingRelationError(canonical.error)
         ) {
           return { data: null, error: null };
         }
 
         return {
           data: null,
-          error: canonical.error ?? missionTable.error ?? studentFallback.error,
+          error: missionTable.error ?? studentFallback.error ?? canonical.error,
         };
       } catch (error) {
         return { data: null, error: asError(error) };
@@ -1379,35 +1627,11 @@ export const supabaseQueries = {
       userId: string,
     ): Promise<QueryResult<GenericRecord[]>> {
       try {
-        const canonical = await supabase
-          .from("submissions")
-          .select("*")
-          .eq("user_id", userId)
-          .order("updated_at", { ascending: false });
-
-        if (!canonical.error) {
-          return {
-            data: normalizeSubmissionRows(
-              (canonical.data ?? []) as GenericRecord[],
-            ),
-            error: null,
-          };
-        }
-
         const primary = await supabase
           .from("mission_submissions")
           .select("*")
           .eq("user_id", userId)
           .order("updated_at", { ascending: false });
-
-        if (!primary.error) {
-          return {
-            data: normalizeSubmissionRows(
-              (primary.data ?? []) as GenericRecord[],
-            ),
-            error: null,
-          };
-        }
 
         const studentIdFallback = await supabase
           .from("mission_submissions")
@@ -1415,19 +1639,65 @@ export const supabaseQueries = {
           .eq("student_id", userId)
           .order("created_at", { ascending: false });
 
-        if (!studentIdFallback.error) {
+        const canonical = await supabase
+          .from("submissions")
+          .select("*")
+          .eq("user_id", userId)
+          .order("updated_at", { ascending: false });
+
+        const primaryRows = !primary.error
+          ? ((primary.data ?? []) as GenericRecord[])
+          : [];
+        const studentFallbackRows = !studentIdFallback.error
+          ? ((studentIdFallback.data ?? []) as GenericRecord[])
+          : [];
+        const canonicalRows = !canonical.error
+          ? ((canonical.data ?? []) as GenericRecord[])
+          : [];
+
+        if (!primary.error || !studentIdFallback.error || !canonical.error) {
+          const byKey = new Map<string, GenericRecord>();
+
+          const pushRows = (rows: GenericRecord[], priority: "canonical" | "mission") => {
+            for (const row of rows) {
+              const missionKey = String(row.mission_id ?? "").trim();
+              const idKey = String(row.id ?? "").trim();
+              const key = missionKey ? `mission:${missionKey}` : `id:${idKey}`;
+              if (!key || key === "id:") {
+                continue;
+              }
+
+              if (priority === "mission" || !byKey.has(key)) {
+                byKey.set(key, row);
+              }
+            }
+          };
+
+          // Keep canonical rows for compatibility, but let mission_submissions win when both exist.
+          pushRows(canonicalRows, "canonical");
+          pushRows(primaryRows, "mission");
+          pushRows(studentFallbackRows, "mission");
+
+          const merged = Array.from(byKey.values()).sort((a, b) => {
+            const aTime = Date.parse(
+              String(a.updated_at ?? a.submitted_at ?? a.created_at ?? ""),
+            );
+            const bTime = Date.parse(
+              String(b.updated_at ?? b.submitted_at ?? b.created_at ?? ""),
+            );
+            return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+          });
+
           return {
-            data: normalizeSubmissionRows(
-              (studentIdFallback.data ?? []) as GenericRecord[],
-            ),
+            data: normalizeSubmissionRows(merged),
             error: null,
           };
         }
 
         if (
-          isMissingRelationError(canonical.error) &&
           isMissingRelationError(primary.error) &&
-          isMissingRelationError(studentIdFallback.error)
+          isMissingRelationError(studentIdFallback.error) &&
+          isMissingRelationError(canonical.error)
         ) {
           logTelemetry(
             "warn",
@@ -1442,7 +1712,7 @@ export const supabaseQueries = {
 
         return {
           data: null,
-          error: canonical.error ?? primary.error ?? studentIdFallback.error,
+          error: primary.error ?? studentIdFallback.error ?? canonical.error,
         };
       } catch (error) {
         return { data: null, error: asError(error) };
@@ -1457,6 +1727,10 @@ export const supabaseQueries = {
           requireAuthenticatedUser: true,
         });
         if (actor.error || !actor.data) {
+          debugMissionSubmission("create_auth_resolution_failed", {
+            payload,
+            error: String(actor.error?.message ?? "Missing user id"),
+          });
           return {
             data: null,
             error: actor.error ?? new Error("Missing user id"),
@@ -1464,6 +1738,11 @@ export const supabaseQueries = {
         }
 
         const effectiveUserId = actor.data;
+        debugMissionSubmission("create_start", {
+          payload,
+          effectiveUserId,
+          targetTable: "public.mission_submissions",
+        });
 
         // Prevent duplicates by reusing existing submission for this user+mission.
         const existing = await this.getSubmissionForMission(
@@ -1471,6 +1750,108 @@ export const supabaseQueries = {
           payload.mission_id,
         );
         if (!existing.error && existing.data) {
+          debugMissionSubmission("create_existing_found", {
+            submissionId: existing.data.id,
+            status: existing.data.status,
+            missionId: existing.data.mission_id,
+            userId: existing.data.user_id,
+          });
+
+          const currentStatus = String(
+            existing.data.status ?? "",
+          ).toLowerCase();
+
+          // Rejected submissions can be retried by moving back to in_progress.
+          if (currentStatus === "rejected") {
+            const reactivatePayload: GenericRecord = {
+              status: "in_progress",
+              updated_at: new Date().toISOString(),
+            };
+
+            debugMissionSubmission("create_reactivate_mission_submissions_request", {
+              submissionId: String(existing.data.id ?? ""),
+              payload: reactivatePayload,
+            });
+
+            const missionTableReactivation = await supabase
+              .from("mission_submissions")
+              .update(reactivatePayload)
+              .eq("id", String(existing.data.id ?? ""))
+              .eq("user_id", effectiveUserId)
+              .select("*")
+              .maybeSingle();
+
+            debugMissionSubmission("create_reactivate_mission_submissions_response", {
+              submissionId: String(existing.data.id ?? ""),
+              error: missionTableReactivation.error
+                ? {
+                    message: missionTableReactivation.error.message,
+                    code: missionTableReactivation.error.code,
+                    details: missionTableReactivation.error.details,
+                    hint: missionTableReactivation.error.hint,
+                  }
+                : null,
+              row: missionTableReactivation.data
+                ? {
+                    id: (missionTableReactivation.data as GenericRecord).id,
+                    status: (missionTableReactivation.data as GenericRecord)
+                      .status,
+                    submitted_at: (missionTableReactivation.data as GenericRecord)
+                      .submitted_at,
+                  }
+                : null,
+            });
+
+            if (
+              !missionTableReactivation.error &&
+              missionTableReactivation.data
+            ) {
+              return {
+                data: normalizeSubmissionRecord(
+                  missionTableReactivation.data as GenericRecord,
+                ),
+                error: null,
+              };
+            }
+
+            const canonicalReactivation = await supabase
+              .from("submissions")
+              .update(reactivatePayload)
+              .eq("id", String(existing.data.id ?? ""))
+              .eq("user_id", effectiveUserId)
+              .select("*")
+              .maybeSingle();
+
+            debugMissionSubmission("create_reactivate_submissions_fallback_response", {
+              submissionId: String(existing.data.id ?? ""),
+              error: canonicalReactivation.error
+                ? {
+                    message: canonicalReactivation.error.message,
+                    code: canonicalReactivation.error.code,
+                    details: canonicalReactivation.error.details,
+                    hint: canonicalReactivation.error.hint,
+                  }
+                : null,
+              row: canonicalReactivation.data
+                ? {
+                    id: (canonicalReactivation.data as GenericRecord).id,
+                    status: (canonicalReactivation.data as GenericRecord).status,
+                    submitted_at: (canonicalReactivation.data as GenericRecord)
+                      .submitted_at,
+                  }
+                : null,
+            });
+
+            if (!canonicalReactivation.error && canonicalReactivation.data) {
+              return {
+                data: normalizeSubmissionRecord(
+                  canonicalReactivation.data as GenericRecord,
+                ),
+                error: null,
+              };
+            }
+          }
+
           return { data: existing.data, error: null };
         }
 
@@ -1478,38 +1859,176 @@ export const supabaseQueries = {
           user_id: effectiveUserId,
           mission_id: payload.mission_id,
           status: "in_progress",
+          updated_at: new Date().toISOString(),
         };
 
-        const canonical = await supabase
-          .from("submissions")
-          .insert(insertPayload)
+        debugMissionSubmission("create_mission_submissions_upsert_request", {
+          payload: insertPayload,
+          onConflict: "user_id,mission_id",
+        });
+
+        const primary = await supabase
+          .from("mission_submissions")
+          .upsert(insertPayload, { onConflict: "user_id,mission_id" })
           .select("*")
           .maybeSingle();
 
-        if (!canonical.error) {
+        debugMissionSubmission("create_mission_submissions_upsert_response", {
+          error: primary.error
+            ? {
+                message: primary.error.message,
+                code: primary.error.code,
+                details: primary.error.details,
+                hint: primary.error.hint,
+              }
+            : null,
+          row: primary.data
+            ? {
+                id: (primary.data as GenericRecord).id,
+                status: (primary.data as GenericRecord).status,
+                submitted_at: (primary.data as GenericRecord).submitted_at,
+                user_id: (primary.data as GenericRecord).user_id,
+              }
+            : null,
+        });
+
+        const primaryNotNullSubmittedAt =
+          !!primary.error &&
+          /submitted_at/i.test(String(primary.error.message ?? "")) &&
+          /not-null|null value/i.test(String(primary.error.message ?? ""));
+
+        const primaryInvalidStatus =
+          !!primary.error &&
+          /status/i.test(String(primary.error.message ?? "")) &&
+          /(constraint|check)/i.test(String(primary.error.message ?? ""));
+
+        if (primaryNotNullSubmittedAt) {
+          const primaryCompat = await supabase
+            .from("mission_submissions")
+            .upsert(
+              {
+                ...insertPayload,
+                submitted_at: new Date().toISOString(),
+              },
+              { onConflict: "user_id,mission_id" },
+            )
+            .select("*")
+            .maybeSingle();
+
+          debugMissionSubmission(
+            "create_mission_submissions_not_null_submitted_at_compat_response",
+            {
+              error: primaryCompat.error
+                ? {
+                    message: primaryCompat.error.message,
+                    code: primaryCompat.error.code,
+                    details: primaryCompat.error.details,
+                    hint: primaryCompat.error.hint,
+                  }
+                : null,
+              row: primaryCompat.data
+                ? {
+                    id: (primaryCompat.data as GenericRecord).id,
+                    status: (primaryCompat.data as GenericRecord).status,
+                    submitted_at: (primaryCompat.data as GenericRecord)
+                      .submitted_at,
+                  }
+                : null,
+            },
+          );
+
+          if (!primaryCompat.error) {
+            return {
+              data: primaryCompat.data
+                ? normalizeSubmissionRecord(primaryCompat.data as GenericRecord)
+                : null,
+              error: null,
+            };
+          }
+        }
+
+        if (primaryInvalidStatus) {
+          const primaryCompat = await supabase
+            .from("mission_submissions")
+            .upsert(
+              {
+                ...insertPayload,
+                status: "pending",
+                submitted_at: new Date().toISOString(),
+              },
+              { onConflict: "user_id,mission_id" },
+            )
+            .select("*")
+            .maybeSingle();
+
+          debugMissionSubmission(
+            "create_mission_submissions_status_compat_response",
+            {
+              error: primaryCompat.error
+                ? {
+                    message: primaryCompat.error.message,
+                    code: primaryCompat.error.code,
+                    details: primaryCompat.error.details,
+                    hint: primaryCompat.error.hint,
+                  }
+                : null,
+              row: primaryCompat.data
+                ? {
+                    id: (primaryCompat.data as GenericRecord).id,
+                    status: (primaryCompat.data as GenericRecord).status,
+                    submitted_at: (primaryCompat.data as GenericRecord)
+                      .submitted_at,
+                  }
+                : null,
+            },
+          );
+
+          if (!primaryCompat.error) {
+            return {
+              data: primaryCompat.data
+                ? normalizeSubmissionRecord(primaryCompat.data as GenericRecord)
+                : null,
+              error: null,
+            };
+          }
+        }
+
+        if (!primary.error) {
           return {
-            data: canonical.data
-              ? normalizeSubmissionRecord(canonical.data as GenericRecord)
+            data: primary.data
+              ? normalizeSubmissionRecord(primary.data as GenericRecord)
               : null,
             error: null,
           };
         }
 
-        const primary = await supabase
-          .from("mission_submissions")
-          .insert(insertPayload)
-          .select("*")
-          .maybeSingle();
-
-        if (!primary.error) {
-          return { data: primary.data, error: null };
-        }
+        debugMissionSubmission("create_mission_submissions_insert_student_id_request", {
+          payload: { ...insertPayload, student_id: insertPayload.user_id },
+        });
 
         const fallback = await supabase
           .from("mission_submissions")
           .insert({ ...insertPayload, student_id: insertPayload.user_id })
           .select("*")
           .maybeSingle();
+
+        debugMissionSubmission("create_mission_submissions_insert_student_id_response", {
+          error: fallback.error
+            ? {
+                message: fallback.error.message,
+                code: fallback.error.code,
+                details: fallback.error.details,
+                hint: fallback.error.hint,
+              }
+            : null,
+          row: fallback.data
+            ? {
+                id: (fallback.data as GenericRecord).id,
+                status: (fallback.data as GenericRecord).status,
+                submitted_at: (fallback.data as GenericRecord).submitted_at,
+              }
+            : null,
+        });
 
         if (!fallback.error) {
           return {
@@ -1520,11 +2039,52 @@ export const supabaseQueries = {
           };
         }
 
+        const canonicalDiagnostic = await supabase
+          .from("submissions")
+          .upsert(insertPayload, { onConflict: "user_id,mission_id" })
+          .select("id,status,submitted_at,user_id,mission_id")
+          .maybeSingle();
+
+        debugMissionSubmission("create_submissions_diagnostic_response", {
+          error: canonicalDiagnostic.error
+            ? {
+                message: canonicalDiagnostic.error.message,
+                code: canonicalDiagnostic.error.code,
+                details: canonicalDiagnostic.error.details,
+                hint: canonicalDiagnostic.error.hint,
+              }
+            : null,
+          row: canonicalDiagnostic.data ?? null,
+        });
+
+        logTelemetry(
+          "error",
+          "mission_submissions_create_failed",
+          "Failed to write mission submission to public.mission_submissions",
+          {
+            userId: effectiveUserId,
+            missionId: payload.mission_id,
+            primaryError: primary.error?.message,
+            fallbackError: fallback.error?.message,
+            canonicalDiagnosticError: canonicalDiagnostic.error?.message,
+          },
+        );
+
         return {
           data: null,
-          error: canonical.error ?? primary.error ?? fallback.error,
+          error:
+            primary.error ??
+            fallback.error ??
+            canonicalDiagnostic.error ??
+            new Error("Failed to write mission submission to mission_submissions"),
         };
       } catch (error) {
+        debugMissionSubmission("create_exception", {
+          error: {
+            message: asError(error).message,
+            stack: asError(error).stack,
+          },
+        });
         return { data: null, error: asError(error) };
       }
     },
@@ -1543,134 +2103,408 @@ export const supabaseQueries = {
           };
         }
 
-        // Try new atomic RPC first (includes auth checks + atomic update)
-        const rpcResult = await supabase.rpc("submit_proof_for_submission", {
-          p_submission_id: submissionId,
-          p_photo_url: photoUrl,
-          p_notes: normalizeTextInput(notes),
-          p_latitude: location?.lat ?? null,
-          p_longitude: location?.lng ?? null,
+        const authSnapshot = await supabase.auth.getUser();
+        const authUserId = String(authSnapshot.data.user?.id ?? "").trim();
+        debugMissionSubmission("submit_start", {
+          submissionId,
+          authUserId,
+          payload: {
+            photoUrl,
+            notes,
+            location,
+          },
+          targetTable: "public.mission_submissions",
         });
 
-        if (!rpcResult.error) {
-          if (Array.isArray(rpcResult.data) && rpcResult.data.length > 0) {
-            return {
-              data: (rpcResult.data[0] as GenericRecord) ?? null,
-              error: null,
-            };
-          }
-          if (rpcResult.data) {
-            return {
-              data: (rpcResult.data as GenericRecord) ?? null,
-              error: null,
-            };
-          }
-        }
-
-        // Fallback to legacy RPC endpoints (backward compatibility)
-        const legacyRpcPayloads: MissionProofRpcPayload[] = [
-          {
-            submission_id: submissionId,
-            photo_url: photoUrl,
-            notes,
-            latitude: location?.lat,
-            longitude: location?.lng,
-          },
-          {
-            submission_id: submissionId,
-            photo_url: photoUrl,
-            notes,
-          },
-        ];
-
-        for (const payload of legacyRpcPayloads) {
-          const rpcCandidates = [
-            supabase.rpc("submit_mission_proof", payload),
-            supabase.rpc("submit_student_mission_proof", payload),
-            supabase.rpc("submit_mission_proof", {
-              p_submission_id: payload.submission_id,
-              p_photo_url: payload.photo_url,
-              p_notes: payload.notes,
-              p_latitude: payload.latitude,
-              p_longitude: payload.longitude,
-            }),
-          ];
-
-          for (const rpcCall of rpcCandidates) {
-            const { data, error } = await rpcCall;
-            if (!error && data) {
-              if (Array.isArray(data)) {
-                return {
-                  data: (data[0] as GenericRecord) ?? null,
-                  error: null,
-                };
-              }
-              return { data: (data as GenericRecord) ?? null, error: null };
-            }
-          }
-        }
-
-        // Final fallback: direct table update
-        const updatePayload: GenericRecord = {
-          status: "pending",
-          notes: normalizeTextInput(notes),
-          submitted_at: new Date().toISOString(),
-          proof_photo_url: photoUrl,
-          photo_url: photoUrl,
-          proof_url: photoUrl,
-          proof_metadata: {
-            notes,
-            latitude: location?.lat,
-            longitude: location?.lng,
-            source: "student-app",
-          },
-          latitude: location?.lat,
-          longitude: location?.lng,
-          updated_at: new Date().toISOString(),
-        };
-
-        const canonical = await supabase
-          .from("submissions")
-          .update(updatePayload)
-          .eq("id", submissionId)
+        // Fetch current submission so repeated submits are idempotent
+        const missionCurrentLookup = await supabase
+          .from("mission_submissions")
           .select("*")
+          .eq("id", submissionId)
           .maybeSingle();
 
-        if (!canonical.error && canonical.data) {
+        const canonicalFallbackLookup =
+          missionCurrentLookup.error || !missionCurrentLookup.data
+            ? await supabase
+                .from("submissions")
+                .select("*")
+                .eq("id", submissionId)
+                .maybeSingle()
+            : null;
+
+        debugMissionSubmission("submit_current_lookup_response", {
+          missionSubmissions: {
+            error: missionCurrentLookup.error
+              ? {
+                  message: missionCurrentLookup.error.message,
+                  code: missionCurrentLookup.error.code,
+                  details: missionCurrentLookup.error.details,
+                  hint: missionCurrentLookup.error.hint,
+                }
+              : null,
+            row: missionCurrentLookup.data
+              ? {
+                  id: (missionCurrentLookup.data as GenericRecord).id,
+                  status: (missionCurrentLookup.data as GenericRecord).status,
+                  submitted_at: (missionCurrentLookup.data as GenericRecord)
+                    .submitted_at,
+                }
+              : null,
+          },
+          submissions: {
+            error: canonicalFallbackLookup?.error
+              ? {
+                  message: canonicalFallbackLookup.error.message,
+                  code: canonicalFallbackLookup.error.code,
+                  details: canonicalFallbackLookup.error.details,
+                  hint: canonicalFallbackLookup.error.hint,
+                }
+              : null,
+            row: canonicalFallbackLookup?.data
+              ? {
+                  id: (canonicalFallbackLookup.data as GenericRecord).id,
+                  status: (canonicalFallbackLookup.data as GenericRecord).status,
+                  submitted_at: (canonicalFallbackLookup.data as GenericRecord)
+                    .submitted_at,
+                }
+              : null,
+          },
+        });
+
+        const current = normalizeSubmissionRecord(
+          (missionCurrentLookup.data ??
+            canonicalFallbackLookup?.data ??
+            {}) as GenericRecord,
+        );
+        const currentStatus = String(current?.status ?? "").toLowerCase();
+        const currentMissionId = String(current?.mission_id ?? "").trim();
+
+        if (
+          current &&
+          (currentStatus === "pending" || currentStatus === "approved") &&
+          String(current.photo_url ?? "").trim()
+        ) {
           return {
-            data: normalizeSubmissionRecord(canonical.data as GenericRecord),
+            data: {
+              ...current,
+              idempotent: true,
+            },
             error: null,
           };
         }
 
-        const primary = await supabase
+        // Try RPC paths first (source of truth for status/rewards)
+        const rpcCandidates = [
+          {
+            name: "submit_mission_proof_p_params",
+            run: () =>
+            supabase.rpc("submit_mission_proof", {
+              p_submission_id: submissionId,
+              p_mission_id: currentMissionId || null,
+              p_photo_url: photoUrl,
+              p_notes: normalizeTextInput(notes),
+              p_latitude: location?.lat ?? null,
+              p_longitude: location?.lng ?? null,
+            }),
+          },
+          {
+            name: "submit_mission_proof_plain_params",
+            run: () =>
+            supabase.rpc("submit_mission_proof", {
+              submission_id: submissionId,
+              mission_id: currentMissionId || null,
+              photo_url: photoUrl,
+              notes: normalizeTextInput(notes),
+              latitude: location?.lat ?? null,
+              longitude: location?.lng ?? null,
+            }),
+          },
+          {
+            name: "submit_proof_for_submission",
+            run: () =>
+            supabase.rpc("submit_proof_for_submission", {
+              p_submission_id: submissionId,
+              p_photo_url: photoUrl,
+              p_notes: normalizeTextInput(notes),
+              p_latitude: location?.lat ?? null,
+              p_longitude: location?.lng ?? null,
+            }),
+          },
+        ];
+
+        for (const rpcCandidate of rpcCandidates) {
+          debugMissionSubmission("submit_rpc_request", {
+            submissionId,
+            rpc: rpcCandidate.name,
+          });
+
+          const rpcResult = await rpcCandidate.run();
+
+          debugMissionSubmission("submit_rpc_response", {
+            submissionId,
+            rpc: rpcCandidate.name,
+            error: rpcResult.error
+              ? {
+                  message: rpcResult.error.message,
+                  code: rpcResult.error.code,
+                  details: rpcResult.error.details,
+                  hint: rpcResult.error.hint,
+                }
+              : null,
+            dataType: Array.isArray(rpcResult.data)
+              ? "array"
+              : typeof rpcResult.data,
+          });
+
+          if (rpcResult.error) {
+            continue;
+          }
+
+          // Explicitly verify row in mission_submissions before trusting RPC response.
+          const rpcMissionRow = await supabase
+            .from("mission_submissions")
+            .select("*")
+            .eq("id", submissionId)
+            .maybeSingle();
+
+          debugMissionSubmission("submit_rpc_postcheck_mission_submissions", {
+            submissionId,
+            rpc: rpcCandidate.name,
+            error: rpcMissionRow.error
+              ? {
+                  message: rpcMissionRow.error.message,
+                  code: rpcMissionRow.error.code,
+                  details: rpcMissionRow.error.details,
+                  hint: rpcMissionRow.error.hint,
+                }
+              : null,
+            row: rpcMissionRow.data
+              ? {
+                  id: (rpcMissionRow.data as GenericRecord).id,
+                  status: (rpcMissionRow.data as GenericRecord).status,
+                  submitted_at: (rpcMissionRow.data as GenericRecord)
+                    .submitted_at,
+                }
+              : null,
+          });
+
+          if (!rpcMissionRow.error && rpcMissionRow.data) {
+            return {
+              data: normalizeSubmissionRecord(
+                rpcMissionRow.data as GenericRecord,
+              ),
+              error: null,
+            };
+          }
+        }
+
+        // Fallback: Direct table update (only use columns that definitely exist: photo_url)
+        const updatePayload: GenericRecord = {
+          photo_url: photoUrl,
+          status: "pending",
+          submitted_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+
+        if (notes && normalizeTextInput(notes)) {
+          updatePayload.notes = normalizeTextInput(notes);
+        }
+
+        if (location?.lat !== undefined && location?.lat !== null) {
+          updatePayload.latitude = location.lat;
+        }
+
+        if (location?.lng !== undefined && location?.lng !== null) {
+          updatePayload.longitude = location.lng;
+        }
+
+        debugMissionSubmission("submit_mission_submissions_update_request", {
+          submissionId,
+          payload: updatePayload,
+        });
+
+        const missionUpdate = await supabase
           .from("mission_submissions")
           .update(updatePayload)
           .eq("id", submissionId)
           .select("*")
           .maybeSingle();
 
-        if (!primary.error && primary.data) {
+        debugMissionSubmission("submit_mission_submissions_update_response", {
+          submissionId,
+          error: missionUpdate.error
+            ? {
+                message: missionUpdate.error.message,
+                code: missionUpdate.error.code,
+                details: missionUpdate.error.details,
+                hint: missionUpdate.error.hint,
+              }
+            : null,
+          row: missionUpdate.data
+            ? {
+                id: (missionUpdate.data as GenericRecord).id,
+                status: (missionUpdate.data as GenericRecord).status,
+                submitted_at: (missionUpdate.data as GenericRecord).submitted_at,
+              }
+            : null,
+        });
+
+        if (!missionUpdate.error && missionUpdate.data) {
+          const normalized = normalizeSubmissionRecord(
+            missionUpdate.data as GenericRecord,
+          );
+          logTelemetry(
+            "info",
+            "submitproof_mission_submissions_update_success",
+            `Submission ${submissionId} updated in mission_submissions: status=${normalized.status}, submitted_at=${normalized.submitted_at}`,
+            {
+              submissionId,
+              updatedStatus: normalized.status,
+              submittedAt: normalized.submitted_at,
+              table: "mission_submissions",
+            },
+          );
           return {
-            data: normalizeSubmissionRecord(primary.data as GenericRecord),
+            data: normalized,
             error: null,
+          };
+        }
+
+        const canonicalUpdate = await supabase
+          .from("submissions")
+          .update(updatePayload)
+          .eq("id", submissionId)
+          .select("*")
+          .maybeSingle();
+
+        debugMissionSubmission("submit_submissions_fallback_update_response", {
+          submissionId,
+          error: canonicalUpdate.error
+            ? {
+                message: canonicalUpdate.error.message,
+                code: canonicalUpdate.error.code,
+                details: canonicalUpdate.error.details,
+                hint: canonicalUpdate.error.hint,
+              }
+            : null,
+          row: canonicalUpdate.data
+            ? {
+                id: (canonicalUpdate.data as GenericRecord).id,
+                status: (canonicalUpdate.data as GenericRecord).status,
+                submitted_at: (canonicalUpdate.data as GenericRecord)
+                  .submitted_at,
+              }
+            : null,
+        });
+
+        if (!canonicalUpdate.error && canonicalUpdate.data) {
+          const canonicalNormalized = normalizeSubmissionRecord(
+            canonicalUpdate.data as GenericRecord,
+          );
+
+          const mirrorPayload: GenericRecord = {
+            id: canonicalNormalized.id,
+            user_id: canonicalNormalized.user_id,
+            student_id:
+              canonicalNormalized.student_id ?? canonicalNormalized.user_id,
+            mission_id: canonicalNormalized.mission_id,
+            status: canonicalNormalized.status ?? "pending",
+            photo_url: canonicalNormalized.photo_url ?? photoUrl,
+            notes:
+              canonicalNormalized.notes ?? normalizeTextInput(notes) ?? null,
+            latitude: canonicalNormalized.latitude ?? location?.lat ?? null,
+            longitude: canonicalNormalized.longitude ?? location?.lng ?? null,
+            submitted_at:
+              canonicalNormalized.submitted_at ?? updatePayload.submitted_at,
+            updated_at: new Date().toISOString(),
+          };
+
+          debugMissionSubmission("submit_mission_submissions_mirror_request", {
+            submissionId,
+            payload: mirrorPayload,
+          });
+
+          const mirrorToMissionTable = await supabase
+            .from("mission_submissions")
+            .upsert(mirrorPayload, { onConflict: "id" })
+            .select("*")
+            .maybeSingle();
+
+          debugMissionSubmission("submit_mission_submissions_mirror_response", {
+            submissionId,
+            error: mirrorToMissionTable.error
+              ? {
+                  message: mirrorToMissionTable.error.message,
+                  code: mirrorToMissionTable.error.code,
+                  details: mirrorToMissionTable.error.details,
+                  hint: mirrorToMissionTable.error.hint,
+                }
+              : null,
+            row: mirrorToMissionTable.data
+              ? {
+                  id: (mirrorToMissionTable.data as GenericRecord).id,
+                  status: (mirrorToMissionTable.data as GenericRecord).status,
+                  submitted_at: (mirrorToMissionTable.data as GenericRecord)
+                    .submitted_at,
+                }
+              : null,
+          });
+
+          if (!mirrorToMissionTable.error && mirrorToMissionTable.data) {
+            return {
+              data: normalizeSubmissionRecord(
+                mirrorToMissionTable.data as GenericRecord,
+              ),
+              error: null,
+            };
+          }
+
+          return {
+            data: null,
+            error:
+              mirrorToMissionTable.error ??
+              new Error(
+                "Proof submitted to submissions but failed to mirror into mission_submissions.",
+              ),
           };
         }
 
         logTelemetry(
           "error",
-          "missionsubmissions_submitproof_failed",
-          "All proof submission paths failed",
+          "submitproof_mission_submissions_update_failed",
+          `Mission_submissions update failed for ${submissionId}`,
           {
             submissionId,
+            missionSubmissionsError: missionUpdate.error?.message,
+            canonicalFallbackError: canonicalUpdate.error?.message,
+          },
+        );
+
+        logTelemetry(
+          "error",
+          "missionsubmissions_submitproof_failed",
+          "All proof submission paths exhausted (RPC + mission_submissions update + submissions fallback)",
+          {
+            submissionId,
+            canonicalError: canonicalUpdate.error?.message,
+            missionSubmissionsError: missionUpdate.error?.message,
           },
         );
 
         return {
           data: null,
-          error: canonical.error ?? primary.error ?? rpcResult.error,
+          error: new Error(
+            "Proof submission failed: mission_submissions update did not persist pending state.",
+          ),
         };
       } catch (error) {
+        debugMissionSubmission("submit_exception", {
+          submissionId,
+          error: {
+            message: asError(error).message,
+            stack: asError(error).stack,
+          },
+        });
         logTelemetry(
           "error",
           "missionsubmissions_submitproof_exception",
@@ -1682,6 +2516,83 @@ export const supabaseQueries = {
         return { data: null, error: asError(error) };
       }
     },
+
+    async withdrawSubmission(
+      submissionId: string,
+      options?: { clearProof?: boolean },
+    ): Promise<QueryResult<GenericRecord>> {
+      try {
+        if (!submissionId) {
+          return {
+            data: null,
+            error: new Error("submissionId is required"),
+          };
+        }
+
+        const actor = await resolveActorUserId(undefined, {
+          requireAuthenticatedUser: true,
+        });
+        if (actor.error || !actor.data) {
+          return {
+            data: null,
+            error: actor.error ?? new Error("Missing authenticated user id"),
+          };
+        }
+
+        const clearProof = options?.clearProof ?? true;
+        const updatePayload: GenericRecord = {
+          status: "in_progress",
+          submitted_at: null,
+          reviewed_at: null,
+          reviewed_by: null,
+          updated_at: new Date().toISOString(),
+        };
+
+        if (clearProof) {
+          updatePayload.photo_url = null;
+          updatePayload.proof_url = null;
+          updatePayload.proof_photo_url = null;
+          updatePayload.proof_metadata = null;
+        }
+
+        const canonical = await supabase
+          .from("submissions")
+          .update(updatePayload)
+          .eq("id", submissionId)
+          .eq("user_id", actor.data)
+          .select("*")
+          .maybeSingle();
+
+        if (!canonical.error && canonical.data) {
+          return {
+            data: normalizeSubmissionRecord(canonical.data as GenericRecord),
+            error: null,
+          };
+        }
+
+        const legacy = await supabase
+          .from("mission_submissions")
+          .update(updatePayload)
+          .eq("id", submissionId)
+          .or(`user_id.eq.${actor.data},student_id.eq.${actor.data}`)
+          .select("*")
+          .maybeSingle();
+
+        if (!legacy.error && legacy.data) {
+          return {
+            data: normalizeSubmissionRecord(legacy.data as GenericRecord),
+            error: null,
+          };
+        }
+
+        return {
+          data: null,
+          error: canonical.error ?? legacy.error ?? new Error("Withdraw failed"),
+        };
+      } catch (error) {
+        return { data: null, error: asError(error) };
+      }
+    },
   },
 
   missionSteps: {
@@ -1689,13 +2600,48 @@ export const supabaseQueries = {
       missionId: string,
     ): Promise<QueryResult<GenericRecord[]>> {
       try {
-        const { data, error } = await supabase
+        const orderCandidates = ["step_order", "step_number", "order_index"];
+        let lastError: PostgrestError | Error | null = null;
+
+        for (const column of orderCandidates) {
+          const response = await supabase
+            .from("mission_steps")
+            .select("*")
+            .eq("mission_id", missionId)
+            .order(column, { ascending: true });
+
+          if (!response.error) {
+            return {
+              data: (response.data ?? []) as GenericRecord[],
+              error: null,
+            };
+          }
+
+          lastError = response.error;
+        }
+
+        // Final fallback: load rows without server-side ordering and sort client-side.
+        const fallback = await supabase
           .from("mission_steps")
           .select("*")
-          .eq("mission_id", missionId)
-          .order("step_order", { ascending: true });
+          .eq("mission_id", missionId);
 
-        return { data: data ?? [], error };
+        if (!fallback.error) {
+          const rows = ((fallback.data ?? []) as GenericRecord[]).sort(
+            (a, b) => {
+              const aOrder = Number(
+                a.step_order ?? a.step_number ?? a.order_index ?? 0,
+              );
+              const bOrder = Number(
+                b.step_order ?? b.step_number ?? b.order_index ?? 0,
+              );
+              return aOrder - bOrder;
+            },
+          );
+          return { data: rows, error: null };
+        }
+
+        return { data: null, error: fallback.error ?? lastError };
       } catch (error) {
         return { data: null, error: asError(error) };
       }
@@ -1703,6 +2649,42 @@ export const supabaseQueries = {
   },
 
   missionStepSubmissions: {
+    async getBySubmissionId(
+      submissionId: string,
+    ): Promise<QueryResult<GenericRecord[]>> {
+      try {
+        const candidates = [
+          supabase
+            .from("mission_step_submissions")
+            .select("*")
+            .eq("submission_id", submissionId)
+            .order("updated_at", { ascending: false }),
+          supabase
+            .from("mission_step_submissions")
+            .select("*")
+            .eq("mission_submission_id", submissionId)
+            .order("updated_at", { ascending: false }),
+        ];
+
+        let lastError: PostgrestError | Error | null = null;
+        for (const call of candidates) {
+          const { data, error } = await call;
+          if (!error) {
+            return { data: (data ?? []) as GenericRecord[], error: null };
+          }
+          lastError = error;
+        }
+
+        if (isMissingRelationError(lastError)) {
+          return { data: [], error: null };
+        }
+
+        return { data: null, error: lastError };
+      } catch (error) {
+        return { data: null, error: asError(error) };
+      }
+    },
+
     async submitStep(
       payload: MissionStepSubmissionPayload,
     ): Promise<QueryResult<GenericRecord>> {
@@ -2641,7 +3623,16 @@ export const supabaseQueries = {
           return { data: [], error: null };
         }
 
-        return { data: data ?? [], error };
+        const rawRows = (data ?? []) as GenericRecord[];
+        const sanitized = await sanitizeNotificationsForStudent(
+          actor.data,
+          rawRows,
+        );
+
+        return {
+          data: sanitized.data ?? rawRows,
+          error,
+        };
       } catch (error) {
         return { data: null, error: asError(error) };
       }
@@ -2719,7 +3710,7 @@ export const supabaseQueries = {
 
         const primary = await supabase
           .from("user_badges")
-          .insert(payload)
+          .upsert(payload, { onConflict: "user_id,badge_id" })
           .select("*")
           .maybeSingle();
 
@@ -2727,11 +3718,33 @@ export const supabaseQueries = {
           return { data: primary.data, error: null };
         }
 
+        const primaryMessage = String(primary.error.message ?? "").toLowerCase();
+        const shouldFallbackToStudentBadges =
+          primaryMessage.includes("user_badges") &&
+          (primaryMessage.includes("could not find") ||
+            primaryMessage.includes("does not exist") ||
+            primaryMessage.includes("schema cache"));
+
+        if (!shouldFallbackToStudentBadges) {
+          return { data: null, error: primary.error };
+        }
+
         const fallback = await supabase
           .from("student_badges")
-          .insert(payload)
+          .upsert(payload, { onConflict: "user_id,badge_id" })
           .select("*")
           .maybeSingle();
+
+        const fallbackMessage = String(fallback.error?.message ?? "").toLowerCase();
+        const fallbackMissingTable =
+          fallbackMessage.includes("student_badges") &&
+          (fallbackMessage.includes("could not find") ||
+            fallbackMessage.includes("does not exist") ||
+            fallbackMessage.includes("schema cache"));
+
+        if (fallbackMissingTable) {
+          return { data: null, error: primary.error };
+        }
 
         return { data: fallback.data, error: fallback.error };
       } catch (error) {
@@ -2831,16 +3844,6 @@ export const supabaseQueries = {
             event: "*",
             schema: "public",
             table: "user_badges",
-            filter: `user_id=eq.${userId}`,
-          },
-          onChange,
-        )
-        .on(
-          "postgres_changes",
-          {
-            event: "*",
-            schema: "public",
-            table: "student_badges",
             filter: `user_id=eq.${userId}`,
           },
           onChange,
@@ -2965,21 +3968,36 @@ export const supabaseQueries = {
       retries: number = 2,
     ): Promise<QueryResult<MissionProofUploadResult>> {
       try {
+        const actor = await resolveActorUserId(payload.userId, {
+          requireAuthenticatedUser: true,
+        });
+
+        if (actor.error || !actor.data) {
+          return {
+            data: null,
+            error: actor.error ?? new Error("Missing authenticated user id."),
+          };
+        }
+
         const extension = extensionFromMimeType(payload.mimeType);
         const timestamp = Date.now();
         const filename = payload.missionId
           ? `${timestamp}`
           : `${timestamp}_${payload.missionId}`;
-        const path = `${payload.userId}/${filename}.${extension}`;
+        const path = `${actor.data}/${filename}.${extension}`;
 
         const fileResponse = await fetch(payload.localUri);
         const fileBuffer = await fileResponse.arrayBuffer();
+
+        const uploadTimeoutMsByAttempt = (attemptIndex: number) =>
+          20000 + attemptIndex * 5000;
 
         let lastError: PostgrestError | Error | null = null;
         let attempt = 0;
 
         while (attempt <= retries) {
           try {
+            const timeoutMs = uploadTimeoutMsByAttempt(attempt);
             const uploadResponse = await Promise.race([
               supabase.storage.from("mission-photos").upload(path, fileBuffer, {
                 contentType: payload.mimeType ?? "image/jpeg",
@@ -2989,7 +4007,7 @@ export const supabaseQueries = {
                 setTimeout(
                   () =>
                     resolve({ error: new Error("Upload timeout"), data: null }),
-                  8000 + attempt * 2000,
+                  timeoutMs,
                 );
               }),
             ]);
@@ -3006,6 +4024,7 @@ export const supabaseQueries = {
                   {
                     attempt,
                     retries,
+                    timeoutMs,
                     path,
                   },
                 );

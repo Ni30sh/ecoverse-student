@@ -1,4 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
+import { useFocusEffect } from "@react-navigation/native";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import { useLocalSearchParams } from "expo-router";
@@ -14,11 +15,24 @@ import {
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 import { invalidateStudentCache } from "@/lib/query/invalidate-student-cache";
+import { supabase } from "@/lib/supabase/client";
 import { supabaseQueries } from "@/lib/supabase/supabase-queries";
 import { getErrorMessage, retryQuery } from "@/lib/utils/resilience";
 import { useAuth } from "@/providers/auth-provider";
 
 type GenericRecord = Record<string, unknown>;
+type BusyAction = "start" | "submit" | "withdraw" | null;
+
+const formatStatusLabel = (status: string): string => {
+  const statusMap: Record<string, string> = {
+    "in_progress": "Started (not submitted)",
+    "pending": "Submitted for teacher review",
+    "approved": "Completed ✓",
+    "rejected": "Needs revision",
+    "available": "Not started",
+  };
+  return statusMap[status.toLowerCase()] ?? status;
+};
 
 export default function MissionDetailScreen() {
   const { missionId } = useLocalSearchParams<{ missionId: string }>();
@@ -27,8 +41,11 @@ export default function MissionDetailScreen() {
 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [mission, setMission] = useState<GenericRecord | null>(null);
   const [submission, setSubmission] = useState<GenericRecord | null>(null);
+  const [missionSteps, setMissionSteps] = useState<GenericRecord[]>([]);
+  const [stepSubmissions, setStepSubmissions] = useState<GenericRecord[]>([]);
   const [proof, setProof] = useState<{ uri: string; mimeType?: string } | null>(
     null,
   );
@@ -36,6 +53,16 @@ export default function MissionDetailScreen() {
     null,
   );
   const [errorMessage, setErrorMessage] = useState("");
+
+  const beginBusy = (action: Exclude<BusyAction, null>) => {
+    setBusy(true);
+    setBusyAction(action);
+  };
+
+  const endBusy = () => {
+    setBusy(false);
+    setBusyAction(null);
+  };
 
   const loadMissionData = useCallback(async () => {
     if (!user || !missionId) {
@@ -45,19 +72,31 @@ export default function MissionDetailScreen() {
 
     setErrorMessage("");
 
-    const [missionResponse, submissionResponse] = await Promise.all([
-      retryQuery(() => supabaseQueries.missions.getById(missionId), {
-        operationName: "missionDetail_missions_getById",
-        context: { missionId },
-      }),
-      retryQuery(
-        () => supabaseQueries.missionSubmissions.getUserSubmissions(user.id),
-        {
-          operationName: "missionDetail_missionSubmissions_getUserSubmissions",
-          context: { missionId, userId: user.id },
-        },
-      ),
-    ]);
+    const [missionResponse, submissionResponse, stepsResponse] =
+      await Promise.all([
+        retryQuery(() => supabaseQueries.missions.getById(missionId), {
+          operationName: "missionDetail_missions_getById",
+          context: { missionId },
+        }),
+        retryQuery(
+          () =>
+            supabaseQueries.missionSubmissions.getSubmissionForMission(
+              user.id,
+              missionId,
+            ),
+          {
+            operationName: "missionDetail_missionSubmissions_getSubmissionForMission",
+            context: { missionId, userId: user.id },
+          },
+        ),
+        retryQuery(
+          () => supabaseQueries.missionSteps.getByMissionId(missionId),
+          {
+            operationName: "missionDetail_missionSteps_getByMissionId",
+            context: { missionId, userId: user.id },
+          },
+        ),
+      ]);
 
     if (missionResponse.error) {
       setErrorMessage(
@@ -81,14 +120,67 @@ export default function MissionDetailScreen() {
       return;
     }
 
-    const allSubmissions = (submissionResponse.data ?? []) as GenericRecord[];
+    if (stepsResponse.error) {
+      setErrorMessage(
+        getErrorMessage(
+          stepsResponse.error,
+          "Failed to load mission requirements.",
+        ),
+      );
+      setLoading(false);
+      return;
+    }
+
     const activeSubmission =
-      allSubmissions.find(
-        (item) => String(item.mission_id ?? "") === missionId,
-      ) ?? null;
+      (submissionResponse.data as GenericRecord | null) ?? null;
+
+    if (__DEV__) {
+      console.log("[mission-detail] server submission refresh", {
+        missionId,
+        userId: user.id,
+        submissionId: String(activeSubmission?.id ?? ""),
+        status: String(activeSubmission?.status ?? "available"),
+      });
+    }
+
+    let loadedStepSubmissions: GenericRecord[] = [];
+    const activeSubmissionId = String(activeSubmission?.id ?? "").trim();
+    if (activeSubmissionId) {
+      const stepSubmissionResponse = await retryQuery(
+        () =>
+          supabaseQueries.missionStepSubmissions.getBySubmissionId(
+            activeSubmissionId,
+          ),
+        {
+          operationName:
+            "missionDetail_missionStepSubmissions_getBySubmissionId",
+          context: {
+            missionId,
+            submissionId: activeSubmissionId,
+            userId: user.id,
+          },
+        },
+      );
+
+      if (stepSubmissionResponse.error) {
+        setErrorMessage(
+          getErrorMessage(
+            stepSubmissionResponse.error,
+            "Failed to load mission step progress.",
+          ),
+        );
+        setLoading(false);
+        return;
+      }
+
+      loadedStepSubmissions = (stepSubmissionResponse.data ??
+        []) as GenericRecord[];
+    }
 
     setMission((missionResponse.data ?? null) as GenericRecord | null);
     setSubmission(activeSubmission);
+    setMissionSteps((stepsResponse.data ?? []) as GenericRecord[]);
+    setStepSubmissions(loadedStepSubmissions);
     setLoading(false);
   }, [missionId, user]);
 
@@ -97,12 +189,82 @@ export default function MissionDetailScreen() {
     void loadMissionData();
   }, [loadMissionData]);
 
+  useFocusEffect(
+    useCallback(() => {
+      if (!user || !missionId) {
+        return;
+      }
+
+      if (__DEV__) {
+        console.log("[mission-detail] focus refresh requested", {
+          missionId,
+          userId: user.id,
+          activeSubmissionId: String(submission?.id ?? ""),
+        });
+      }
+
+      setLoading(true);
+      void loadMissionData();
+    }, [loadMissionData, missionId, submission?.id, user]),
+  );
+
+  useEffect(() => {
+    if (!user || !missionId) {
+      return;
+    }
+
+    const channel = supabase.channel(`mission-detail-live-${user.id}-${missionId}`);
+
+    channel
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "mission_submissions",
+          filter: `user_id=eq.${user.id}`,
+        },
+        () => {
+          if (__DEV__) {
+            console.log("[mission-detail] realtime mission_submissions change", {
+              missionId,
+              userId: user.id,
+            });
+          }
+          void loadMissionData();
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "submissions",
+          filter: `user_id=eq.${user.id}`,
+        },
+        () => {
+          if (__DEV__) {
+            console.log("[mission-detail] realtime submissions change", {
+              missionId,
+              userId: user.id,
+            });
+          }
+          void loadMissionData();
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [loadMissionData, missionId, user]);
+
   const startMission = async () => {
     if (!user || !missionId) {
       return;
     }
 
-    setBusy(true);
+    beginBusy("start");
     const response = await retryQuery(
       () =>
         supabaseQueries.missionSubmissions.create({
@@ -121,13 +283,21 @@ export default function MissionDetailScreen() {
         "Start failed",
         getErrorMessage(response.error, "Could not start mission."),
       );
-      setBusy(false);
+      endBusy();
       return;
+    }
+
+    if (__DEV__) {
+      console.log("[mission-ui] startMission server row:", {
+        id: (response.data as GenericRecord).id,
+        status: (response.data as GenericRecord).status,
+        submitted_at: (response.data as GenericRecord).submitted_at,
+      });
     }
 
     setSubmission(response.data as GenericRecord);
     await invalidateStudentCache(queryClient, user.id);
-    setBusy(false);
+    endBusy();
   };
 
   const attachProof = async () => {
@@ -188,7 +358,46 @@ export default function MissionDetailScreen() {
       return;
     }
 
-    setBusy(true);
+    const requiresLocation = Boolean(mission?.requires_location ?? false);
+    if (requiresLocation && !location) {
+      Alert.alert(
+        "Location required",
+        "This mission requires location proof before final submission.",
+      );
+      return;
+    }
+
+    if (missionSteps.length > 0) {
+      const completedStatuses = new Set([
+        "completed",
+        "submitted",
+        "verified",
+        "approved",
+      ]);
+      const completedStepIds = new Set(
+        stepSubmissions
+          .filter((row) =>
+            completedStatuses.has(String(row.status ?? "").toLowerCase()),
+          )
+          .map((row) => String(row.mission_step_id ?? row.step_id ?? "").trim())
+          .filter((value) => value.length > 0),
+      );
+
+      const missingSteps = missionSteps.filter((step) => {
+        const stepId = String(step.id ?? "").trim();
+        return stepId.length > 0 && !completedStepIds.has(stepId);
+      });
+
+      if (missingSteps.length > 0) {
+        Alert.alert(
+          "Requirements pending",
+          "Complete all mission steps before final submission.",
+        );
+        return;
+      }
+    }
+
+    beginBusy("submit");
 
     const uploadResponse = await retryQuery(
       () =>
@@ -209,7 +418,7 @@ export default function MissionDetailScreen() {
         "Upload failed",
         getErrorMessage(uploadResponse.error, "Could not upload proof image."),
       );
-      setBusy(false);
+      endBusy();
       return;
     }
 
@@ -234,29 +443,205 @@ export default function MissionDetailScreen() {
     );
 
     if (submitResponse.error) {
+      console.error(
+        "[missionDetail] submitProof error:",
+        submitResponse.error,
+      );
       Alert.alert(
         "Submission failed",
         getErrorMessage(submitResponse.error, "Could not submit proof."),
       );
-      setBusy(false);
+      endBusy();
       return;
     }
 
-    const status = String(
+    if (!submitResponse.data) {
+      console.error(
+        "[missionDetail] submitProof returned no data",
+      );
+      Alert.alert(
+        "Submission failed",
+        "No data returned from submission update.",
+      );
+      endBusy();
+      return;
+    }
+
+
+    if (__DEV__) {
+      console.log("[mission-ui] submitProof server row:", {
+        requestedSubmissionId: submissionId,
+        returnedId: (submitResponse.data as GenericRecord).id,
+        returnedStatus: (submitResponse.data as GenericRecord).status,
+        returnedSubmittedAt: (submitResponse.data as GenericRecord).submitted_at,
+        idsMatch:
+          String((submitResponse.data as GenericRecord).id ?? "") ===
+          submissionId,
+      });
+    }
+    const oldStatus = String(
+      submission?.status ?? "in_progress",
+    ).toLowerCase();
+    const newStatus = String(
       submitResponse.data?.status ?? "pending",
     ).toLowerCase();
-    if (status === "approved") {
+    const submittedAt = submitResponse.data?.submitted_at;
+
+    console.log(
+      `[missionDetail] submitProof successful: status ${oldStatus} → ${newStatus}, submitted_at=${submittedAt}`,
+      {
+        submissionId,
+        oldStatus,
+        newStatus,
+        submittedAt,
+        idempotent: submitResponse.data?.idempotent,
+      },
+    );
+
+    // Verify status actually changed
+    if (
+      oldStatus === "in_progress" &&
+      newStatus !== "pending" &&
+      newStatus !== "approved"
+    ) {
+      console.warn(
+        `[missionDetail] WARNING: Status should be pending or approved but got ${newStatus}`,
+        {
+          submissionId,
+          newStatus,
+        },
+      );
+    }
+
+    // Verify submitted_at was set
+    if (!submittedAt) {
+      console.warn(
+        `[missionDetail] WARNING: submitted_at not set in response`,
+        { submissionId },
+      );
+    }
+
+    if (newStatus === "approved") {
       Alert.alert(
         "Approved",
         "Mission auto-approved. Points and streak updated.",
       );
     } else {
-      Alert.alert("Submitted", "Mission proof submitted and pending review.");
+      Alert.alert(
+        "Submitted",
+        `Mission proof submitted and pending review.${oldStatus !== "in_progress" ? " (Note: you had already started this mission.)" : ""}`,
+      );
     }
 
+    // CRITICAL: Update local submission state immediately so UI reflects status change instantly
+    // This prevents students from seeing stale "in_progress" status during server refresh
+    console.log(
+      "[missionDetail] Immediately updating local submission state to reflect server response",
+      { oldStatus, newStatus, submittedAt },
+    );
+    setSubmission((prevSubmission) => ({
+      ...(prevSubmission ?? {}),
+      ...submitResponse.data,
+      status: newStatus,
+      submitted_at: submittedAt,
+      updated_at: new Date().toISOString(),
+    }));
+
+    // Then refresh from server in the background to confirm and sync any other changes
+    console.log(
+      "[missionDetail] Starting async data refresh from server",
+      { submissionId, newStatus },
+    );
     await invalidateStudentCache(queryClient, user.id);
     await loadMissionData();
-    setBusy(false);
+
+    // Confirm UI state updated before clearing busy
+    console.log(
+      "[missionDetail] Proof submission flow complete - status: in_progress → pending, UI confirmed refreshed",
+      { submissionId, finalStatus: newStatus },
+    );
+    endBusy();
+  };
+
+  const withdrawSubmission = async () => {
+    if (!user) {
+      return;
+    }
+
+    const submissionId = String(submission?.id ?? "").trim();
+    if (!submissionId) {
+      Alert.alert("No submission", "Start the mission first.");
+      return;
+    }
+
+    const currentStatus = String(submission?.status ?? "").toLowerCase();
+    if (currentStatus !== "pending" && currentStatus !== "in_progress") {
+      Alert.alert(
+        "Cannot withdraw",
+        "Only in-progress or pending submissions can be withdrawn.",
+      );
+      return;
+    }
+
+    Alert.alert(
+      "Withdraw submission",
+      "This will move mission back to in-progress and remove submitted proof. Continue?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Withdraw",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              beginBusy("withdraw");
+
+              const response = await retryQuery(
+                () =>
+                  supabaseQueries.missionSubmissions.withdrawSubmission(
+                    submissionId,
+                    {
+                      clearProof: true,
+                    },
+                  ),
+                {
+                  operationName: "missionDetail_withdrawSubmission",
+                  context: {
+                    missionId: String(missionId),
+                    submissionId,
+                    userId: user.id,
+                  },
+                },
+              );
+
+              if (response.error || !response.data) {
+                Alert.alert(
+                  "Withdraw failed",
+                  getErrorMessage(
+                    response.error,
+                    "Could not withdraw submission.",
+                  ),
+                );
+                endBusy();
+                return;
+              }
+
+              setSubmission((response.data ?? null) as GenericRecord | null);
+              setProof(null);
+              setLocation(null);
+
+              await invalidateStudentCache(queryClient, user.id);
+              await loadMissionData();
+
+              Alert.alert(
+                "Withdrawn",
+                "Submission reverted to in-progress. You can submit again.",
+              );
+              endBusy();
+            })();
+          },
+        },
+      ],
+    );
   };
 
   return (
@@ -287,14 +672,21 @@ export default function MissionDetailScreen() {
             )}
           </ThemedText>
           <ThemedText>
-            Current status: {String(submission?.status ?? "available")}
+            Current status: {formatStatusLabel(String(submission?.status ?? "available"))}
           </ThemedText>
+          {String(submission?.status ?? "").toLowerCase() === "rejected" &&
+          String(submission?.feedback ?? "").trim() ? (
+            <ThemedText style={styles.errorText}>
+              Teacher feedback: {String(submission?.feedback ?? "")}
+            </ThemedText>
+          ) : null}
         </ThemedView>
       ) : null}
 
       <Pressable
         style={styles.secondaryButton}
         onPress={() => void loadMissionData()}
+        disabled={busy}
       >
         <ThemedText style={styles.secondaryButtonLabel}>
           Refresh Mission
@@ -306,7 +698,7 @@ export default function MissionDetailScreen() {
         onPress={() => void startMission()}
         disabled={busy}
       >
-        {busy ? (
+        {busyAction === "start" ? (
           <ActivityIndicator color="#ffffff" />
         ) : (
           <ThemedText style={styles.primaryButtonLabel}>
@@ -318,6 +710,7 @@ export default function MissionDetailScreen() {
       <Pressable
         style={styles.secondaryButton}
         onPress={() => void attachProof()}
+        disabled={busy}
       >
         <ThemedText style={styles.secondaryButtonLabel}>
           {proof ? "Proof Selected" : "Attach Proof Photo"}
@@ -327,6 +720,7 @@ export default function MissionDetailScreen() {
       <Pressable
         style={styles.secondaryButton}
         onPress={() => void captureLocation()}
+        disabled={busy}
       >
         <ThemedText style={styles.secondaryButtonLabel}>
           {location ? "Location Captured" : "Attach Location"}
@@ -338,7 +732,7 @@ export default function MissionDetailScreen() {
         onPress={() => void submitProof()}
         disabled={busy}
       >
-        {busy ? (
+        {busyAction === "submit" ? (
           <ActivityIndicator color="#ffffff" />
         ) : (
           <ThemedText style={styles.primaryButtonLabel}>
@@ -346,6 +740,22 @@ export default function MissionDetailScreen() {
           </ThemedText>
         )}
       </Pressable>
+
+      {submission ? (
+        <Pressable
+          style={styles.dangerButton}
+          onPress={() => void withdrawSubmission()}
+          disabled={busy}
+        >
+          {busyAction === "withdraw" ? (
+            <ActivityIndicator color="#ffffff" />
+          ) : (
+            <ThemedText style={styles.dangerButtonLabel}>
+              Withdraw Submission
+            </ThemedText>
+          )}
+        </Pressable>
+      ) : null}
     </ScrollView>
   );
 }
@@ -388,6 +798,17 @@ const styles = StyleSheet.create({
   },
   secondaryButtonLabel: {
     color: "#0a7ea4",
+    fontWeight: "700",
+  },
+  dangerButton: {
+    minHeight: 44,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#b00020",
+  },
+  dangerButtonLabel: {
+    color: "#ffffff",
     fontWeight: "700",
   },
   errorText: {

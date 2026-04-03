@@ -1,4 +1,4 @@
-import { supabase } from "@/integrations/supabase/client";
+import { supabase } from "@/lib/supabase/client";
 import type {
     Session as SupabaseSession,
     User as SupabaseUser,
@@ -367,11 +367,13 @@ export function StudentAuthProvider({ children }: { children: ReactNode }) {
     // Listen for auth state changes
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    } = supabase.auth.onAuthStateChange(
+      (_event: unknown, nextSession: SupabaseSession | null) => {
       if (!mounted) return;
       setLoading(false);
       void applySession(nextSession);
-    });
+      },
+    );
 
     return () => {
       mounted = false;

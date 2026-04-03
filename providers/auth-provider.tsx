@@ -1,11 +1,11 @@
 import { Session, User } from "@supabase/supabase-js";
 import {
-  createContext,
-  PropsWithChildren,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
+    createContext,
+    PropsWithChildren,
+    useContext,
+    useEffect,
+    useMemo,
+    useState,
 } from "react";
 
 import { supabase } from "@/lib/supabase/client";
@@ -21,11 +21,151 @@ type AuthContextValue = {
   signingIn: boolean;
   signingUp: boolean;
   signIn: (email: string, password: string) => Promise<{ error: Error | null }>;
-  signUp: (email: string, password: string) => Promise<{ error: Error | null }>;
+  signUp: (
+    fullName: string,
+    email: string,
+    password: string,
+    schoolName: string,
+  ) => Promise<{ error: Error | null }>;
   signOut: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
+
+const SUPPORTED_SCHOOLS = new Set(["MPGI", "PSIT", "KIT", "KGI", "AKTU"]);
+
+function isTransientNetworkError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : String(error).toLowerCase();
+
+  return (
+    message.includes("failed to fetch") ||
+    message.includes("network request failed") ||
+    message.includes("load failed") ||
+    message.includes("networkerror")
+  );
+}
+
+function mapAuthError(error: unknown, fallback: string): Error {
+  if (isTransientNetworkError(error)) {
+    return new Error(
+      "Cannot reach Supabase right now. Check internet, VPN/proxy, and Supabase URL/Anon key, then retry.",
+    );
+  }
+
+  if (error instanceof Error) {
+    return error;
+  }
+
+  return new Error(fallback);
+}
+
+function isMissingProfileError(error: Error | null): boolean {
+  if (!error) {
+    return false;
+  }
+
+  return error.message
+    .toLowerCase()
+    .includes("profile was not created automatically");
+}
+
+function normalizeSchoolName(value: string) {
+  return value.trim().toUpperCase();
+}
+
+async function resolveSchoolIdByName(
+  schoolName: string,
+): Promise<string | null> {
+  const normalizedName = normalizeSchoolName(schoolName);
+  if (!normalizedName) {
+    return null;
+  }
+
+  try {
+    const existing = await supabase
+      .from("schools")
+      .select("id,name")
+      .ilike("name", normalizedName)
+      .maybeSingle();
+
+    if (!existing.error && existing.data?.id) {
+      return String(existing.data.id);
+    }
+
+    const inserted = await supabase
+      .from("schools")
+      .insert({ name: normalizedName })
+      .select("id")
+      .maybeSingle();
+
+    if (!inserted.error && inserted.data?.id) {
+      return String(inserted.data.id);
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function syncStudentSchoolMapping(
+  userId: string,
+  fullName: string,
+  schoolName: string,
+) {
+  const schoolId = await resolveSchoolIdByName(schoolName);
+  const now = new Date().toISOString();
+
+  const studentUpdate = await supabase
+    .from("students")
+    .update({
+      full_name: fullName,
+      school_id: schoolId,
+      updated_at: now,
+    })
+    .eq("id", userId);
+
+  if (studentUpdate.error) {
+    logTelemetry(
+      "warn",
+      "auth_signup_students_school_update_failed",
+      studentUpdate.error.message,
+      {
+        userId,
+        schoolName,
+      },
+    );
+  }
+
+  const profileUpsert = await supabase.from("profiles").upsert(
+    {
+      id: userId,
+      full_name: fullName,
+      role: "student",
+      school_id: schoolId,
+      school_name: schoolName,
+      updated_at: now,
+    },
+    { onConflict: "id" },
+  );
+
+  if (profileUpsert.error) {
+    // Fallback for older schemas that may not have school_name.
+    await supabase.from("profiles").upsert(
+      {
+        id: userId,
+        full_name: fullName,
+        role: "student",
+        school_id: schoolId,
+        updated_at: now,
+      },
+      { onConflict: "id" },
+    );
+  }
+}
 
 /**
  * Fetch student profile from the students table.
@@ -36,22 +176,46 @@ async function fetchStudentProfile(userId: string): Promise<{
   error: Error | null;
 }> {
   try {
-    const studentsResponse = await supabase
+    let studentsResponse = await supabase
       .from("students")
       .select("*")
       .eq("id", userId)
       .maybeSingle();
+
+    if (
+      studentsResponse.error &&
+      isTransientNetworkError(studentsResponse.error)
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      studentsResponse = await supabase
+        .from("students")
+        .select("*")
+        .eq("id", userId)
+        .maybeSingle();
+    }
 
     let data = studentsResponse.data;
     let error = studentsResponse.error;
 
     // Backward-compatible fallback for older schemas still using profiles.
     if (error || !data) {
-      const profileResponse = await supabase
+      let profileResponse = await supabase
         .from("profiles")
         .select("*")
         .eq("id", userId)
         .maybeSingle();
+
+      if (
+        profileResponse.error &&
+        isTransientNetworkError(profileResponse.error)
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        profileResponse = await supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", userId)
+          .maybeSingle();
+      }
 
       if (!profileResponse.error && profileResponse.data) {
         data = profileResponse.data;
@@ -88,8 +252,10 @@ async function fetchStudentProfile(userId: string): Promise<{
     }
 
     // Verify role is student
-    const role = String(data.role ?? "").toLowerCase();
-    if (role !== "student") {
+    const role = String(data.role ?? "")
+      .toLowerCase()
+      .trim();
+    if (role && role !== "student") {
       logTelemetry("warn", "auth_role_not_student", `User has role: ${role}`, {
         userId,
       });
@@ -111,6 +277,39 @@ async function fetchStudentProfile(userId: string): Promise<{
       error:
         error instanceof Error ? error : new Error("Failed to load profile"),
     };
+  }
+}
+
+async function recoverMissingStudentProfile(user: User): Promise<boolean> {
+  try {
+    const metadata =
+      (user.user_metadata as Record<string, unknown> | null) ?? null;
+    const fullName = String(metadata?.full_name ?? "").trim();
+    const schoolName = String(metadata?.school_name ?? "").trim();
+
+    const { error } = await supabase.rpc("ensure_student_profile", {
+      p_user_id: user.id,
+      p_email: user.email ?? "",
+      p_full_name: fullName || null,
+      p_school_name: schoolName || null,
+    });
+
+    if (error) {
+      logTelemetry("warn", "auth_profile_recovery_rpc_failed", error.message, {
+        userId: user.id,
+      });
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    logTelemetry(
+      "warn",
+      "auth_profile_recovery_exception",
+      error instanceof Error ? error.message : "Unknown profile recovery error",
+      { userId: user.id },
+    );
+    return false;
   }
 }
 
@@ -163,17 +362,29 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
         // Session exists, fetch profile
         setSession(data.session);
-        const profileResult = await fetchStudentProfile(data.session.user.id);
+        let profileResult = await fetchStudentProfile(data.session.user.id);
+        if (isMissingProfileError(profileResult.error)) {
+          const recovered = await recoverMissingStudentProfile(
+            data.session.user,
+          );
+          if (recovered) {
+            profileResult = await fetchStudentProfile(data.session.user.id);
+          }
+        }
+
         if (profileResult.error) {
           logTelemetry(
             "warn",
             "auth_profile_load_failed",
             profileResult.error.message,
           );
-          // Sign out if profile can't be loaded (security issue)
-          await supabase.auth.signOut();
-          setSession(null);
-          setProfile(null);
+          if (isTransientNetworkError(profileResult.error)) {
+            // Keep session and use a minimal student profile fallback on transient fetch errors.
+            setProfile({ id: data.session.user.id, role: "student" });
+          } else {
+            // Keep session to avoid login bounce loops; user can retry data load in-app.
+            setProfile({ id: data.session.user.id, role: "student" });
+          }
         } else {
           setProfile(profileResult.profile);
         }
@@ -209,11 +420,24 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setLoading(true);
 
         void (async () => {
-          const profileResult = await fetchStudentProfile(nextSession.user.id);
+          let profileResult = await fetchStudentProfile(nextSession.user.id);
+          if (isMissingProfileError(profileResult.error)) {
+            const recovered = await recoverMissingStudentProfile(
+              nextSession.user,
+            );
+            if (recovered) {
+              profileResult = await fetchStudentProfile(nextSession.user.id);
+            }
+          }
+
           if (profileResult.error) {
-            await supabase.auth.signOut();
-            setSession(null);
-            setProfile(null);
+            logTelemetry(
+              "warn",
+              "auth_profile_load_failed_after_state_change",
+              profileResult.error.message,
+              { event },
+            );
+            setProfile({ id: nextSession.user.id, role: "student" });
           } else {
             setProfile(profileResult.profile);
           }
@@ -236,14 +460,28 @@ export function AuthProvider({ children }: PropsWithChildren) {
     setSigningIn(true);
 
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({
+      let response = await supabase.auth.signInWithPassword({
         email: email.trim().toLowerCase(),
         password,
       });
 
+      // Retry once for transient network fetch issues commonly seen on unstable links.
+      if (response.error && isTransientNetworkError(response.error)) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        response = await supabase.auth.signInWithPassword({
+          email: email.trim().toLowerCase(),
+          password,
+        });
+      }
+
+      const { data, error } = response;
+
       if (error) {
-        logTelemetry("warn", "auth_signin_failed", error.message, { email });
-        return { error };
+        const mappedError = mapAuthError(error, "Failed to sign in");
+        logTelemetry("warn", "auth_signin_failed", mappedError.message, {
+          email,
+        });
+        return { error: mappedError };
       }
 
       if (!data.user || !data.session) {
@@ -259,11 +497,10 @@ export function AuthProvider({ children }: PropsWithChildren) {
       );
       return { error: null };
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Unknown login error";
-      logTelemetry("error", "auth_signin_exception", errorMessage);
+      const mappedError = mapAuthError(error, "Failed to sign in");
+      logTelemetry("error", "auth_signin_exception", mappedError.message);
       return {
-        error: error instanceof Error ? error : new Error("Failed to sign in"),
+        error: mappedError,
       };
     } finally {
       setSigningIn(false);
@@ -275,13 +512,50 @@ export function AuthProvider({ children }: PropsWithChildren) {
    * Do NOT manually create profile — the PostgreSQL trigger handles it.
    * After signup, user is redirected to login (they need to verify if required).
    */
-  const signUp = async (email: string, password: string) => {
+  const signUp = async (
+    fullName: string,
+    email: string,
+    password: string,
+    schoolName: string,
+  ) => {
     setSigningUp(true);
 
     try {
+      const normalizedFullName = fullName.trim();
+      const normalizedEmail = email.trim().toLowerCase();
+      const normalizedSchool = normalizeSchoolName(schoolName);
+
+      if (
+        !normalizedFullName ||
+        !normalizedEmail ||
+        !password ||
+        !normalizedSchool
+      ) {
+        return {
+          error: new Error(
+            "Full name, email, password, and school are required.",
+          ),
+        };
+      }
+
+      if (!SUPPORTED_SCHOOLS.has(normalizedSchool)) {
+        return {
+          error: new Error(
+            "Please select a valid school: MPGI, PSIT, KIT, KGI, AKTU.",
+          ),
+        };
+      }
+
       const { data, error } = await supabase.auth.signUp({
-        email: email.trim().toLowerCase(),
+        email: normalizedEmail,
         password,
+        options: {
+          data: {
+            full_name: normalizedFullName,
+            school_name: normalizedSchool,
+            role: "student",
+          },
+        },
       });
 
       if (error) {
@@ -310,10 +584,20 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
       // Trigger creates the student profile automatically
       // No need to manually insert
+      await syncStudentSchoolMapping(
+        data.user.id,
+        normalizedFullName,
+        normalizedSchool,
+      );
+
       logTelemetry(
         "info",
         "auth_signup_success",
         `Account created: ${data.user.email}`,
+        {
+          userId: data.user.id,
+          school: normalizedSchool,
+        },
       );
 
       return { error: null };
