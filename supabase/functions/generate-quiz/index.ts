@@ -9,6 +9,13 @@ type QuizQuestion = {
   explanation?: string;
 };
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Content-Type": "application/json",
+  "Cache-Control": "no-store",
+};
+
 function fallbackQuestions(topic: string): QuizQuestion[] {
   const safeTopic = topic.trim() || "Sustainability";
   return [
@@ -70,8 +77,7 @@ function fallbackQuestions(topic: string): QuizQuestion[] {
         "Frequent replacement needs",
       ],
       correctAnswer: 0,
-      explanation:
-        "Long-lasting products reduce lifecycle waste and emissions.",
+      explanation: "Long-lasting products reduce lifecycle waste and emissions.",
     },
   ];
 }
@@ -111,39 +117,155 @@ function normalizeQuestion(
   };
 }
 
+function normalizeQuestions(raw: unknown, topic: string): QuizQuestion[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw
+    .map((item, index) => normalizeQuestion(item, index, topic))
+    .filter((item): item is QuizQuestion => Boolean(item));
+}
+
+async function generateWithOpenAI(input: {
+  topic: string;
+  lessonTitle: string;
+  lessonBody: string;
+}): Promise<QuizQuestion[] | null> {
+  const apiKey = Deno.env.get("OPENAI_API_KEY")?.trim();
+  if (!apiKey) {
+    return null;
+  }
+
+  const bodyExcerpt = input.lessonBody.slice(0, 1800);
+  const prompt = [
+    "Create exactly 5 multiple-choice quiz questions in JSON.",
+    "Use this schema:",
+    '{"questions":[{"id":"q1","question":"...","options":["A","B","C","D"],"correctAnswer":0,"explanation":"..."}]}',
+    "Rules:",
+    "- 4 options each",
+    "- exactly one correct answer index (0-3)",
+    "- questions should be easy-to-medium for school students",
+    "- no markdown, only JSON",
+    `Topic: ${input.topic}`,
+    `Lesson title: ${input.lessonTitle || "N/A"}`,
+    `Lesson content summary: ${bodyExcerpt || "N/A"}`,
+  ].join("\n");
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0.3,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a quiz generation assistant. Return strict JSON only with a top-level questions array.",
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    console.error("[generate-quiz] OpenAI error status", response.status);
+    return null;
+  }
+
+  const data = await response.json();
+  const content = String(data?.choices?.[0]?.message?.content ?? "").trim();
+  if (!content) {
+    return null;
+  }
+
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return null;
+  }
+
+  const questionsRaw =
+    parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).questions)
+      ? (parsed as Record<string, unknown>).questions
+      : [];
+
+  const normalized = normalizeQuestions(questionsRaw, input.topic);
+  if (normalized.length < 3) {
+    return null;
+  }
+
+  return normalized.slice(0, 5);
+}
+
 serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: CORS_HEADERS });
+  }
+
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {
       status: 405,
-      headers: { "Content-Type": "application/json" },
+      headers: CORS_HEADERS,
     });
   }
 
   try {
-    const body = (await req.json()) as { topic?: unknown };
+    const body = (await req.json()) as {
+      topic?: unknown;
+      lessonTitle?: unknown;
+      lessonBody?: unknown;
+    };
+
     const topic = String(body?.topic ?? "").trim() || "Sustainability";
+    const lessonTitle = String(body?.lessonTitle ?? "").trim();
+    const lessonBody = String(body?.lessonBody ?? "").trim();
 
-    const questions = fallbackQuestions(topic)
-      .map((item, index) => normalizeQuestion(item, index, topic))
-      .filter((item): item is QuizQuestion => Boolean(item));
-
-    return new Response(JSON.stringify({ topic, questions }), {
-      status: 200,
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-store",
-      },
+    const aiQuestions = await generateWithOpenAI({
+      topic,
+      lessonTitle,
+      lessonBody,
     });
-  } catch {
-    const questions = fallbackQuestions("Sustainability");
+
+    const questions =
+      aiQuestions && aiQuestions.length > 0
+        ? aiQuestions
+        : fallbackQuestions(topic)
+            .map((item, index) => normalizeQuestion(item, index, topic))
+            .filter((item): item is QuizQuestion => Boolean(item));
+
     return new Response(
-      JSON.stringify({ topic: "Sustainability", questions }),
+      JSON.stringify({
+        topic,
+        questions,
+        source: aiQuestions ? "openai" : "fallback",
+      }),
       {
         status: 200,
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-store",
-        },
+        headers: CORS_HEADERS,
+      },
+    );
+  } catch (error) {
+    console.error("[generate-quiz] failed", error);
+    const questions = fallbackQuestions("Sustainability");
+    return new Response(
+      JSON.stringify({
+        topic: "Sustainability",
+        questions,
+        source: "fallback",
+      }),
+      {
+        status: 200,
+        headers: CORS_HEADERS,
       },
     );
   }

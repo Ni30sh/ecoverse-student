@@ -5,12 +5,15 @@ import * as Location from "expo-location";
 import { useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    Pressable,
-    ScrollView,
-    StyleSheet,
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
 } from "react-native";
+import { LinearGradient } from "expo-linear-gradient";
+import Animated, { FadeInDown } from "react-native-reanimated";
 
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
@@ -178,6 +181,30 @@ export default function MissionDetailScreen() {
     }
 
     setMission((missionResponse.data ?? null) as GenericRecord | null);
+    
+    // VALIDATION: Check if submission is marked as pending/approved but missing proof/location
+    if (activeSubmission) {
+      const submissionStatus = String(activeSubmission.status ?? "").toLowerCase();
+      const photoUrl = String(activeSubmission.photo_url ?? "").trim();
+      const latitude = activeSubmission.latitude;
+      const longitude = activeSubmission.longitude;
+      
+      if ((submissionStatus === "pending" || submissionStatus === "approved") && 
+          (!photoUrl || latitude === null || latitude === undefined || longitude === null || longitude === undefined)) {
+        console.warn("[mission-detail] WARNING: Submission marked as submitted but missing proof/location", {
+          submissionId: activeSubmission.id,
+          status: submissionStatus,
+          hasPhoto: Boolean(photoUrl),
+          hasLocation: latitude !== null && latitude !== undefined && longitude !== null && longitude !== undefined,
+        });
+        
+        setErrorMessage(
+          "⚠️ Submission data incomplete: Photo proof or location is missing. " +
+          "Please re-submit with complete information."
+        );
+      }
+    }
+    
     setSubmission(activeSubmission);
     setMissionSteps((stepsResponse.data ?? []) as GenericRecord[]);
     setStepSubmissions(loadedStepSubmissions);
@@ -358,11 +385,10 @@ export default function MissionDetailScreen() {
       return;
     }
 
-    const requiresLocation = Boolean(mission?.requires_location ?? false);
-    if (requiresLocation && !location) {
+    if (!location) {
       Alert.alert(
         "Location required",
-        "This mission requires location proof before final submission.",
+        "Capture current location before final submission.",
       );
       return;
     }
@@ -644,9 +670,37 @@ export default function MissionDetailScreen() {
     );
   };
 
+  const missionStatus = String(submission?.status ?? "available").toLowerCase();
+  const missionStarted = missionStatus !== "available";
+  const proofReady = Boolean(proof?.uri);
+  const locationReady = Boolean(location);
+  const readyForSubmission =
+    missionStarted &&
+    proofReady &&
+    locationReady &&
+    (missionStatus === "in_progress" || missionStatus === "rejected");
+  const canSubmitProof =
+    readyForSubmission && !busy;
+  const isPendingReview = missionStatus === "pending";
+  const isApproved = missionStatus === "approved";
+
+
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <ThemedText type="title">Mission Detail</ThemedText>
+      <Animated.View entering={FadeInDown.duration(320)}>
+        <LinearGradient colors={["#0f766e", "#14b8a6"]} style={styles.heroCard}>
+          <ThemedText style={styles.heroTitle}>Mission Run</ThemedText>
+          <ThemedText style={styles.heroSubtitle}>
+            {String(mission?.title ?? mission?.name ?? "Mission")}
+          </ThemedText>
+          <View style={styles.statusPill}>
+            <ThemedText style={styles.statusPillText}>
+              {formatStatusLabel(missionStatus)}
+            </ThemedText>
+          </View>
+        </LinearGradient>
+      </Animated.View>
 
       {loading ? (
         <ThemedView style={styles.centered}>
@@ -656,25 +710,19 @@ export default function MissionDetailScreen() {
       ) : null}
 
       {errorMessage ? (
-        <ThemedText style={styles.errorText}>{errorMessage}</ThemedText>
+        <ThemedView style={styles.errorCard}>
+          <ThemedText style={styles.errorText}>{errorMessage}</ThemedText>
+        </ThemedView>
       ) : null}
 
       {mission ? (
         <ThemedView style={styles.card}>
-          <ThemedText type="subtitle">
-            {String(mission.title ?? mission.name ?? "Mission")}
-          </ThemedText>
-          <ThemedText>
+          <ThemedText style={styles.descriptionText}>
             {String(
-              mission.description ??
-                mission.summary ??
-                "No mission description.",
+              mission.description ?? mission.summary ?? "No mission description.",
             )}
           </ThemedText>
-          <ThemedText>
-            Current status: {formatStatusLabel(String(submission?.status ?? "available"))}
-          </ThemedText>
-          {String(submission?.status ?? "").toLowerCase() === "rejected" &&
+          {missionStatus === "rejected" &&
           String(submission?.feedback ?? "").trim() ? (
             <ThemedText style={styles.errorText}>
               Teacher feedback: {String(submission?.feedback ?? "")}
@@ -683,63 +731,89 @@ export default function MissionDetailScreen() {
         </ThemedView>
       ) : null}
 
+      <ThemedView style={styles.card}>
+        <ThemedText type="subtitle">Mission Checklist</ThemedText>
+        <ThemedText style={styles.checkRow}>
+          {missionStarted ? "✅" : "⬜"} Start mission
+        </ThemedText>
+        <ThemedText style={styles.checkRow}>
+          {proofReady ? "✅" : "⬜"} Capture photo proof
+        </ThemedText>
+        <ThemedText style={styles.checkRow}>
+          {locationReady ? "✅" : "⬜"} Capture current location
+        </ThemedText>
+        <ThemedText style={styles.checkRow}>
+          {isPendingReview ? "✅" : "⬜"} Submit for review
+        </ThemedText>
+        {isApproved ? (
+          <ThemedText style={styles.approvedText}>
+            🎉 Mission approved and points credited.
+          </ThemedText>
+        ) : null}
+      </ThemedView>
+
       <Pressable
         style={styles.secondaryButton}
         onPress={() => void loadMissionData()}
         disabled={busy}
       >
-        <ThemedText style={styles.secondaryButtonLabel}>
-          Refresh Mission
-        </ThemedText>
+        <ThemedText style={styles.secondaryButtonLabel}>Refresh Mission</ThemedText>
       </Pressable>
 
-      <Pressable
-        style={styles.primaryButton}
-        onPress={() => void startMission()}
-        disabled={busy}
-      >
-        {busyAction === "start" ? (
-          <ActivityIndicator color="#ffffff" />
-        ) : (
-          <ThemedText style={styles.primaryButtonLabel}>
-            Start Mission
-          </ThemedText>
-        )}
-      </Pressable>
+      {!missionStarted ? (
+        <Pressable
+          style={styles.primaryButton}
+          onPress={() => void startMission()}
+          disabled={busy}
+        >
+          {busyAction === "start" ? (
+            <ActivityIndicator color="#ffffff" />
+          ) : (
+            <ThemedText style={styles.primaryButtonLabel}>Start Mission</ThemedText>
+          )}
+        </Pressable>
+      ) : null}
 
       <Pressable
-        style={styles.secondaryButton}
+        style={[styles.secondaryButton, !missionStarted ? styles.disabledButton : null]}
         onPress={() => void attachProof()}
-        disabled={busy}
+        disabled={busy || !missionStarted}
       >
         <ThemedText style={styles.secondaryButtonLabel}>
-          {proof ? "Proof Selected" : "Attach Proof Photo"}
+          {proof ? "Photo Proof Captured ✅" : "Capture Photo Proof"}
         </ThemedText>
       </Pressable>
 
       <Pressable
-        style={styles.secondaryButton}
+        style={[styles.secondaryButton, !missionStarted ? styles.disabledButton : null]}
         onPress={() => void captureLocation()}
-        disabled={busy}
+        disabled={busy || !missionStarted}
       >
         <ThemedText style={styles.secondaryButtonLabel}>
-          {location ? "Location Captured" : "Attach Location"}
+          {location ? "Current Location Captured ✅" : "Capture Current Location"}
         </ThemedText>
       </Pressable>
 
       <Pressable
-        style={styles.primaryButton}
+        style={[styles.primaryButton, canSubmitProof ? styles.highlightButton : styles.disabledButton]}
         onPress={() => void submitProof()}
-        disabled={busy}
+        disabled={!canSubmitProof}
       >
         {busyAction === "submit" ? (
           <ActivityIndicator color="#ffffff" />
         ) : (
-          <ThemedText style={styles.primaryButtonLabel}>
-            Submit Proof
-          </ThemedText>
+          <ThemedText style={styles.primaryButtonLabel}>Submit Mission</ThemedText>
         )}
       </Pressable>
+
+      {isPendingReview ? (
+        <ThemedView style={styles.reviewCard}>
+          <ThemedText style={styles.reviewTitle}>Under Review</ThemedText>
+          <ThemedText style={styles.reviewText}>
+            Your mission has been submitted to teacher review.
+          </ThemedText>
+        </ThemedView>
+      ) : null}
 
       {submission ? (
         <Pressable
@@ -750,9 +824,7 @@ export default function MissionDetailScreen() {
           {busyAction === "withdraw" ? (
             <ActivityIndicator color="#ffffff" />
           ) : (
-            <ThemedText style={styles.dangerButtonLabel}>
-              Withdraw Submission
-            </ThemedText>
+            <ThemedText style={styles.dangerButtonLabel}>Withdraw Submission</ThemedText>
           )}
         </Pressable>
       ) : null}
@@ -764,6 +836,35 @@ const styles = StyleSheet.create({
   container: {
     padding: 16,
     gap: 12,
+  },
+  heroCard: {
+    borderRadius: 16,
+    padding: 16,
+    gap: 8,
+  },
+  heroTitle: {
+    color: "#ccfbf1",
+    fontWeight: "700",
+    fontSize: 12,
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
+  heroSubtitle: {
+    color: "#ffffff",
+    fontSize: 22,
+    fontWeight: "800",
+  },
+  statusPill: {
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(255,255,255,0.18)",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  statusPillText: {
+    color: "#ffffff",
+    fontWeight: "700",
+    fontSize: 12,
   },
   centered: {
     alignItems: "center",
@@ -777,6 +878,19 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     padding: 14,
     gap: 8,
+  },
+  descriptionText: {
+    lineHeight: 20,
+    opacity: 0.9,
+  },
+  checkRow: {
+    fontWeight: "600",
+    fontSize: 14,
+  },
+  approvedText: {
+    marginTop: 6,
+    color: "#16a34a",
+    fontWeight: "700",
   },
   primaryButton: {
     minHeight: 48,
@@ -799,6 +913,35 @@ const styles = StyleSheet.create({
   secondaryButtonLabel: {
     color: "#0a7ea4",
     fontWeight: "700",
+  },
+  highlightButton: {
+    backgroundColor: "#16a34a",
+  },
+  disabledButton: {
+    opacity: 0.45,
+  },
+  reviewCard: {
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.35)",
+    borderRadius: 12,
+    padding: 12,
+    backgroundColor: "rgba(245, 158, 11, 0.08)",
+    gap: 4,
+  },
+  reviewTitle: {
+    color: "#b45309",
+    fontWeight: "800",
+  },
+  reviewText: {
+    color: "#92400e",
+    fontWeight: "500",
+  },
+  errorCard: {
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.35)",
+    borderRadius: 12,
+    padding: 12,
+    backgroundColor: "rgba(239, 68, 68, 0.06)",
   },
   dangerButton: {
     minHeight: 44,

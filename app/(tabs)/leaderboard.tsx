@@ -69,6 +69,8 @@ export default function LeaderboardScreen() {
   const [loading, setLoading] = useState(true);
   const [topUsers, setTopUsers] = useState<GenericRecord[]>([]);
   const [rank, setRank] = useState(0);
+  const [globalTopUsers, setGlobalTopUsers] = useState<GenericRecord[]>([]);
+  const [globalRank, setGlobalRank] = useState(0);
   const [errorMessage, setErrorMessage] = useState("");
 
   const viewerClass = useMemo(
@@ -89,15 +91,58 @@ export default function LeaderboardScreen() {
 
     setErrorMessage("");
 
-    const [topResponse, rankResponse] = await Promise.all([
-      retryQuery(() => supabaseQueries.leaderboard.getTopUsers(50), {
+    const [topResponse, rankResponse, globalTopResponse, globalRankResponse] =
+      await Promise.all([
+      retryQuery(
+        () =>
+          supabaseQueries.leaderboard.getTopUsers(
+            50,
+            "all_time",
+            "my_school",
+            user.id,
+          ),
+        {
         operationName: "leaderboard_getTopUsers",
         context: { screen: "leaderboard" },
-      }),
-      retryQuery(() => supabaseQueries.leaderboard.getRank(user.id), {
+        },
+      ),
+      retryQuery(
+        () =>
+          supabaseQueries.leaderboard.getRank(
+            user.id,
+            "all_time",
+            "my_school",
+          ),
+        {
         operationName: "leaderboard_getRank",
         context: { screen: "leaderboard" },
-      }),
+        },
+      ),
+      retryQuery(
+        () =>
+          supabaseQueries.leaderboard.getTopUsers(
+            50,
+            "all_time",
+            "global",
+            user.id,
+          ),
+        {
+          operationName: "leaderboard_getTopUsers_global",
+          context: { screen: "leaderboard" },
+        },
+      ),
+      retryQuery(
+        () =>
+          supabaseQueries.leaderboard.getRank(
+            user.id,
+            "all_time",
+            "global",
+          ),
+        {
+          operationName: "leaderboard_getRank_global",
+          context: { screen: "leaderboard" },
+        },
+      ),
     ]);
 
     const firstError = topResponse.error ?? rankResponse.error;
@@ -112,6 +157,14 @@ export default function LeaderboardScreen() {
     setTopUsers((topResponse.data ?? []) as GenericRecord[]);
     setRank(
       toNumber(rankResponse.data as GenericRecord | null, [
+        "rank",
+        "position",
+        "user_rank",
+      ]),
+    );
+    setGlobalTopUsers((globalTopResponse.data ?? []) as GenericRecord[]);
+    setGlobalRank(
+      toNumber(globalRankResponse.data as GenericRecord | null, [
         "rank",
         "position",
         "user_rank",
@@ -149,6 +202,17 @@ export default function LeaderboardScreen() {
     return (classRows.length > 0 ? classRows : sorted).slice(0, 20);
   }, [topUsers, viewerClass]);
 
+  const globalRankingRows = useMemo(() => {
+    return [...globalTopUsers]
+      .sort((a, b) => {
+        return (
+          toNumber(b, ["eco_points", "points", "total_points"]) -
+          toNumber(a, ["eco_points", "points", "total_points"])
+        );
+      })
+      .slice(0, 50);
+  }, [globalTopUsers]);
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Animated.View entering={FadeInDown.duration(350)}>
@@ -180,9 +244,52 @@ export default function LeaderboardScreen() {
           colors={["#f59e0b", "#fbbf24"]}
           style={styles.rankCard}
         >
-          <ThemedText style={styles.rankLabel}>Your Rank</ThemedText>
+          <ThemedText style={styles.rankLabel}>Your School Rank</ThemedText>
           <ThemedText style={styles.rankValue}>#{rank || 0}</ThemedText>
         </LinearGradient>
+      </Animated.View>
+
+      <Animated.View entering={FadeInDown.delay(82).duration(350)}>
+        <GlassCard style={styles.globalCard}>
+          <View style={styles.globalHeaderRow}>
+            <ThemedText type="subtitle" style={styles.leaderboardTitle}>
+              Global Ranking (All Students)
+            </ThemedText>
+            <ThemedText style={styles.globalRankText}>
+              Your Global Rank: #{globalRank || 0}
+            </ThemedText>
+          </View>
+
+          {globalRankingRows.length === 0 ? (
+            <ThemedText style={styles.emptyText}>No global ranking data found.</ThemedText>
+          ) : (
+            <View style={styles.rankingList}>
+              {globalRankingRows.map((entry, index) => (
+                <View
+                  key={`global-${String(entry.user_id ?? entry.id ?? index)}-${index}`}
+                  style={styles.globalRankingRow}
+                >
+                  <View style={styles.rankingLeft}>
+                    <ThemedText style={styles.rankMedal}>
+                      {getMedalEmoji(index) || `${index + 1}`}
+                    </ThemedText>
+                    <View style={styles.rankingInfo}>
+                      <ThemedText style={styles.rankingName}>
+                        {String(entry.name ?? entry.full_name ?? entry.email ?? "Student")}
+                      </ThemedText>
+                      <ThemedText style={styles.globalSchoolName}>
+                        {toText(entry, ["school_name", "college_name"]) || "School"}
+                      </ThemedText>
+                    </View>
+                  </View>
+                  <ThemedText style={styles.rankingPoints}>
+                    {toNumber(entry, ["eco_points", "points", "total_points"])}
+                  </ThemedText>
+                </View>
+              ))}
+            </View>
+          )}
+        </GlassCard>
       </Animated.View>
 
       <Animated.View entering={FadeInDown.delay(105).duration(350)}>
@@ -288,6 +395,32 @@ const styles = StyleSheet.create({
   },
   leaderboardCard: {
     gap: 16,
+  },
+  globalCard: {
+    gap: 12,
+  },
+  globalHeaderRow: {
+    gap: 4,
+  },
+  globalRankText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#0f766e",
+  },
+  globalRankingRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: "rgba(15, 118, 110, 0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(15, 118, 110, 0.16)",
+  },
+  globalSchoolName: {
+    fontSize: 12,
+    opacity: 0.65,
   },
   leaderboardTitle: {
     fontSize: 18,

@@ -364,16 +364,33 @@ async function resolveSchoolContextForUser(
 
     const studentLookup = await supabase
       .from("students")
-      .select("school_id,school_name")
+      .select("school_id")
       .eq("id", normalizedUserId)
       .maybeSingle();
 
     if (!studentLookup.error && studentLookup.data) {
       const row = studentLookup.data as GenericRecord;
+      const schoolId = String(row.school_id ?? "").trim();
+      let schoolName = "";
+
+      if (schoolId) {
+        const schoolLookup = await supabase
+          .from("schools")
+          .select("name")
+          .eq("id", schoolId)
+          .maybeSingle();
+
+        if (!schoolLookup.error && schoolLookup.data) {
+          schoolName = String(
+            (schoolLookup.data as GenericRecord).name ?? "",
+          ).trim();
+        }
+      }
+
       return {
         data: {
-          schoolId: String(row.school_id ?? "").trim(),
-          schoolName: String(row.school_name ?? "").trim(),
+          schoolId,
+          schoolName,
         },
         error: null,
       };
@@ -1503,6 +1520,180 @@ export const supabaseQueries = {
         return { data: null, error: asError(error) };
       }
     },
+
+    async getSchoolAndTeacher(
+      userId: string,
+    ): Promise<QueryResult<GenericRecord>> {
+      try {
+        const normalizeTeacher = (row: GenericRecord | null): GenericRecord | null => {
+          if (!row) {
+            return null;
+          }
+
+          const id = String(row.id ?? row.user_id ?? "").trim();
+          if (!id) {
+            return null;
+          }
+
+          const email = String(row.email ?? "").trim();
+          const name =
+            String(row.full_name ?? row.name ?? "").trim() ||
+            email ||
+            "Teacher";
+
+          return {
+            id,
+            name,
+            email,
+          };
+        };
+
+        // Primary source: students table.
+        const studentResult = await supabase
+          .from("students")
+          .select("id,school_id")
+          .eq("id", userId)
+          .maybeSingle();
+
+        // Profiles is the canonical source for teacher assignment.
+        const profileResult = await supabase
+          .from("profiles")
+          .select("id,user_id,school_id,teacher_id")
+          .or(`id.eq.${userId},user_id.eq.${userId}`)
+          .limit(1)
+          .maybeSingle();
+
+        const studentRow =
+          ((studentResult.data ?? profileResult.data ?? null) as GenericRecord | null);
+
+        if (!studentRow) {
+          return {
+            data: null,
+            error: studentResult.error ?? profileResult.error ?? new Error("Student not found"),
+          };
+        }
+
+        const profileRow = profileResult.data as GenericRecord | null;
+        const schoolId = String(profileRow?.school_id ?? studentRow.school_id ?? "").trim();
+        const assignedTeacherId = String(profileRow?.teacher_id ?? "").trim();
+        let schoolName = "";
+
+        const isSameSchoolTeacher = (teacherRow: GenericRecord | null) => {
+          if (!teacherRow) {
+            return false;
+          }
+
+          const teacherSchoolId = String(teacherRow.school_id ?? "").trim();
+          return Boolean(schoolId && teacherSchoolId && schoolId === teacherSchoolId);
+        };
+
+        if (!schoolName && schoolId) {
+          const schoolResult = await supabase
+            .from("schools")
+            .select("name")
+            .eq("id", schoolId)
+            .maybeSingle();
+
+          if (!schoolResult.error && schoolResult.data) {
+            schoolName = String(
+              (schoolResult.data as GenericRecord).name ?? "",
+            ).trim();
+          }
+        }
+
+        let teacher: GenericRecord | null = null;
+
+        // For now, do not infer teacher when no explicit teacher_id is assigned.
+        if (!assignedTeacherId) {
+          return {
+            data: {
+              schoolId,
+              schoolName,
+              teacher: null,
+            },
+            error: null,
+          };
+        }
+
+        // 1) If teacher_id is assigned, resolve that exact teacher first.
+        const assignedTeacherStudent = await supabase
+          .from("students")
+          .select("id,full_name,name,email,role,school_id")
+          .eq("id", assignedTeacherId)
+          .eq("role", "teacher")
+          .maybeSingle();
+
+        if (
+          !assignedTeacherStudent.error &&
+          assignedTeacherStudent.data &&
+          isSameSchoolTeacher(assignedTeacherStudent.data as GenericRecord)
+        ) {
+          teacher = normalizeTeacher(assignedTeacherStudent.data as GenericRecord);
+        } else {
+          const assignedTeacherProfile = await supabase
+            .from("profiles")
+            .select("id,user_id,full_name,name,email,role,school_id")
+            .or(`id.eq.${assignedTeacherId},user_id.eq.${assignedTeacherId}`)
+            .eq("role", "teacher")
+            .limit(1)
+            .maybeSingle();
+
+          if (
+            !assignedTeacherProfile.error &&
+            assignedTeacherProfile.data &&
+            isSameSchoolTeacher(assignedTeacherProfile.data as GenericRecord)
+          ) {
+            teacher = normalizeTeacher(assignedTeacherProfile.data as GenericRecord);
+          }
+        }
+
+        // 2) Fallback: find any teacher in same school_id.
+        if (!teacher && schoolId) {
+          const sameSchoolTeacherStudent = await supabase
+            .from("students")
+            .select("id,full_name,name,email,role,school_id")
+            .eq("school_id", schoolId)
+            .eq("role", "teacher")
+            .limit(1)
+            .maybeSingle();
+
+          if (
+            !sameSchoolTeacherStudent.error &&
+            sameSchoolTeacherStudent.data &&
+            isSameSchoolTeacher(sameSchoolTeacherStudent.data as GenericRecord)
+          ) {
+            teacher = normalizeTeacher(sameSchoolTeacherStudent.data as GenericRecord);
+          } else {
+            const sameSchoolTeacherProfile = await supabase
+              .from("profiles")
+              .select("id,user_id,full_name,name,email,role,school_id")
+              .eq("school_id", schoolId)
+              .eq("role", "teacher")
+              .limit(1)
+              .maybeSingle();
+
+            if (
+              !sameSchoolTeacherProfile.error &&
+              sameSchoolTeacherProfile.data &&
+              isSameSchoolTeacher(sameSchoolTeacherProfile.data as GenericRecord)
+            ) {
+              teacher = normalizeTeacher(sameSchoolTeacherProfile.data as GenericRecord);
+            }
+          }
+        }
+
+        return {
+          data: {
+            schoolId,
+            schoolName,
+            teacher,
+          },
+          error: null,
+        };
+      } catch (error) {
+        return { data: null, error: asError(error) };
+      }
+    },
   },
 
   missions: {
@@ -2353,15 +2544,40 @@ export const supabaseQueries = {
           const normalized = normalizeSubmissionRecord(
             missionUpdate.data as GenericRecord,
           );
+
+          // VALIDATION: Ensure photo_url was saved
+          const savedPhotoUrl = String(normalized.photo_url ?? "").trim();
+          if (!savedPhotoUrl) {
+            return {
+              data: null,
+              error: new Error("Photo proof was not saved properly. Please try uploading again."),
+            };
+          }
+
+          // VALIDATION: Ensure location was captured (lat/lng not null)
+          const savedLat = normalized.latitude;
+          const savedLng = normalized.longitude;
+          const hasValidLat = savedLat !== null && savedLat !== undefined && Number.isFinite(Number(savedLat));
+          const hasValidLng = savedLng !== null && savedLng !== undefined && Number.isFinite(Number(savedLng));
+          
+          if (!hasValidLat || !hasValidLng) {
+            return {
+              data: null,
+              error: new Error("Location was not saved properly. Please capture location again and resubmit."),
+            };
+          }
+
           logTelemetry(
             "info",
             "submitproof_mission_submissions_update_success",
-            `Submission ${submissionId} updated in mission_submissions: status=${normalized.status}, submitted_at=${normalized.submitted_at}`,
+            `Submission ${submissionId} updated in mission_submissions: status=${normalized.status}, submitted_at=${normalized.submitted_at}, photo=${savedPhotoUrl}, location=(${savedLat},${savedLng})`,
             {
               submissionId,
               updatedStatus: normalized.status,
               submittedAt: normalized.submitted_at,
               table: "mission_submissions",
+              hasPhoto: Boolean(savedPhotoUrl),
+              hasLocation: hasValidLat && hasValidLng,
             },
           );
           return {
@@ -2451,10 +2667,34 @@ export const supabaseQueries = {
           });
 
           if (!mirrorToMissionTable.error && mirrorToMissionTable.data) {
+            const mirrored = normalizeSubmissionRecord(
+              mirrorToMissionTable.data as GenericRecord,
+            );
+
+            // VALIDATION: Ensure photo_url was mirrored
+            const savedPhotoUrl = String(mirrored.photo_url ?? "").trim();
+            if (!savedPhotoUrl) {
+              return {
+                data: null,
+                error: new Error("Photo proof was not saved properly. Please try uploading again."),
+              };
+            }
+
+            // VALIDATION: Ensure location was mirrored (lat/lng not null)
+            const savedLat = mirrored.latitude;
+            const savedLng = mirrored.longitude;
+            const hasValidLat = savedLat !== null && savedLat !== undefined && Number.isFinite(Number(savedLat));
+            const hasValidLng = savedLng !== null && savedLng !== undefined && Number.isFinite(Number(savedLng));
+            
+            if (!hasValidLat || !hasValidLng) {
+              return {
+                data: null,
+                error: new Error("Location was not saved properly. Please capture location again and resubmit."),
+              };
+            }
+
             return {
-              data: normalizeSubmissionRecord(
-                mirrorToMissionTable.data as GenericRecord,
-              ),
+              data: mirrored,
               error: null,
             };
           }
@@ -2907,6 +3147,7 @@ export const supabaseQueries = {
     async markComplete(
       userId: string,
       lessonId: string,
+      options?: { skipReward?: boolean },
     ): Promise<QueryResult<GenericRecord>> {
       try {
         const actor = await resolveActorUserId(userId, {
@@ -2981,26 +3222,28 @@ export const supabaseQueries = {
         }
 
         let awardedPoints = 0;
-        const lesson = await supabase
-          .from("lessons")
-          .select("eco_points_reward")
-          .eq("id", lessonId)
-          .maybeSingle();
+        if (!options?.skipReward) {
+          const lesson = await supabase
+            .from("lessons")
+            .select("eco_points_reward")
+            .eq("id", lessonId)
+            .maybeSingle();
 
-        if (!lesson.error && lesson.data) {
-          const reward = Number(
-            (lesson.data as GenericRecord).eco_points_reward ?? 0,
-          );
-          if (Number.isFinite(reward) && reward > 0) {
-            let rewardApplied = false;
-            const ecoUpdate = await incrementEcoPoints(effectiveUserId, reward);
-            if (!ecoUpdate.error) {
-              awardedPoints = reward;
-              rewardApplied = true;
-            }
+          if (!lesson.error && lesson.data) {
+            const reward = Number(
+              (lesson.data as GenericRecord).eco_points_reward ?? 0,
+            );
+            if (Number.isFinite(reward) && reward > 0) {
+              let rewardApplied = false;
+              const ecoUpdate = await incrementEcoPoints(effectiveUserId, reward);
+              if (!ecoUpdate.error) {
+                awardedPoints = reward;
+                rewardApplied = true;
+              }
 
-            if (rewardApplied) {
-              await incrementDailyPoints(effectiveUserId, reward);
+              if (rewardApplied) {
+                await incrementDailyPoints(effectiveUserId, reward);
+              }
             }
           }
         }
@@ -3028,6 +3271,10 @@ export const supabaseQueries = {
           String(
             payload.topic ?? payload.topicTitle ?? "Sustainability",
           ).trim() || "Sustainability";
+        const lessonTitle =
+          String(payload.lessonTitle ?? payload.title ?? "").trim();
+        const lessonBody =
+          String(payload.lessonBody ?? payload.content ?? "").trim();
         const candidates = [
           "generate-quiz",
           "quiz-generate",
@@ -3042,6 +3289,8 @@ export const supabaseQueries = {
             supabase.functions.invoke(fnName, {
               body: {
                 topic,
+                lessonTitle,
+                lessonBody,
               },
               headers: accessToken
                 ? { Authorization: `Bearer ${accessToken}` }
@@ -3378,6 +3627,93 @@ export const supabaseQueries = {
       userId?: string,
     ): Promise<QueryResult<GenericRecord[]>> {
       try {
+        const enrichLeaderboardRowsWithSchool = async (
+          rows: GenericRecord[],
+        ): Promise<GenericRecord[]> => {
+          if (rows.length === 0) {
+            return rows;
+          }
+
+          const userIds = Array.from(
+            new Set(
+              rows
+                .map((row) => String(row.user_id ?? row.id ?? "").trim())
+                .filter((id) => id.length > 0),
+            ),
+          );
+
+          if (userIds.length === 0) {
+            return rows;
+          }
+
+          const schoolNameByUserId = new Map<string, string>();
+
+          const studentLookup = await supabase
+            .from("students")
+            .select("id,school_name,college_name")
+            .in("id", userIds);
+
+          if (!studentLookup.error) {
+            for (const row of (studentLookup.data ?? []) as GenericRecord[]) {
+              const id = String(row.id ?? "").trim();
+              if (!id) {
+                continue;
+              }
+
+              const schoolName = normalizeTextInput(
+                row.school_name ?? row.college_name,
+              );
+              if (schoolName) {
+                schoolNameByUserId.set(id, schoolName);
+              }
+            }
+          }
+
+          const missingIds = userIds.filter((id) => !schoolNameByUserId.has(id));
+          if (missingIds.length > 0) {
+            const profileLookup = await supabase
+              .from("profiles")
+              .select("id,school_name,college_name")
+              .in("id", missingIds);
+
+            if (!profileLookup.error) {
+              for (const row of (profileLookup.data ?? []) as GenericRecord[]) {
+                const id = String(row.id ?? "").trim();
+                if (!id) {
+                  continue;
+                }
+
+                const schoolName = normalizeTextInput(
+                  row.school_name ?? row.college_name,
+                );
+                if (schoolName) {
+                  schoolNameByUserId.set(id, schoolName);
+                }
+              }
+            }
+          }
+
+          return rows.map((row) => {
+            const currentSchoolName = normalizeTextInput(
+              row.school_name ?? row.college_name,
+            );
+            if (currentSchoolName) {
+              return row;
+            }
+
+            const uid = String(row.user_id ?? row.id ?? "").trim();
+            const resolvedSchool = schoolNameByUserId.get(uid) ?? "";
+            if (!resolvedSchool) {
+              return row;
+            }
+
+            return {
+              ...row,
+              school_name: resolvedSchool,
+            };
+          });
+        };
+
         const rpcCandidates = [
           supabase.rpc("get_leaderboard", {
             p_period: period,
@@ -3396,9 +3732,10 @@ export const supabaseQueries = {
         for (const rpcCall of rpcCandidates) {
           const { data, error } = await rpcCall;
           if (!error) {
-            const rows = ((data ?? []) as GenericRecord[]).map((row) =>
+            const normalizedRows = ((data ?? []) as GenericRecord[]).map((row) =>
               normalizeLeaderboardRecord(row),
             );
+            const rows = await enrichLeaderboardRowsWithSchool(normalizedRows);
             return { data: rows, error: null };
           }
         }
@@ -3493,7 +3830,8 @@ export const supabaseQueries = {
           }
         }
 
-        return { data: rows, error };
+        const enrichedRows = await enrichLeaderboardRowsWithSchool(rows);
+        return { data: enrichedRows, error };
       } catch (error) {
         logTelemetry(
           "error",
@@ -3668,15 +4006,40 @@ export const supabaseQueries = {
           };
         }
 
-        const { data, error } = await supabase
+        const readAtIso = new Date().toISOString();
+
+        const primary = await supabase
           .from("notifications")
-          .update({ is_read: true, read_at: new Date().toISOString() })
+          .update({ is_read: true, read_at: readAtIso })
           .eq("id", notificationId)
           .eq("user_id", actor.data)
           .select("*")
           .maybeSingle();
 
-        return { data, error };
+        if (!primary.error) {
+          return { data: primary.data, error: null };
+        }
+
+        const message = String(primary.error.message ?? "").toLowerCase();
+        const readAtMissing =
+          message.includes("read_at") &&
+          (message.includes("schema cache") ||
+            message.includes("could not find") ||
+            message.includes("does not exist"));
+
+        if (!readAtMissing) {
+          return { data: null, error: primary.error };
+        }
+
+        const fallback = await supabase
+          .from("notifications")
+          .update({ is_read: true })
+          .eq("id", notificationId)
+          .eq("user_id", actor.data)
+          .select("*")
+          .maybeSingle();
+
+        return { data: fallback.data, error: fallback.error };
       } catch (error) {
         return { data: null, error: asError(error) };
       }
@@ -3747,6 +4110,198 @@ export const supabaseQueries = {
         }
 
         return { data: fallback.data, error: fallback.error };
+      } catch (error) {
+        return { data: null, error: asError(error) };
+      }
+    },
+
+    async getUserBadges(userId: string): Promise<QueryResult<GenericRecord[]>> {
+      try {
+        const linkRowsPrimary = await supabase
+          .from("user_badges")
+          .select("badge_id")
+          .eq("user_id", userId);
+
+        let linkRows = linkRowsPrimary.data as GenericRecord[] | null;
+        let linkError = linkRowsPrimary.error;
+
+        if (linkError) {
+          const message = String(linkError.message ?? "").toLowerCase();
+          const shouldFallback =
+            message.includes("user_badges") &&
+            (message.includes("could not find") ||
+              message.includes("does not exist") ||
+              message.includes("schema cache"));
+
+          if (!shouldFallback) {
+            return { data: null, error: linkError };
+          }
+
+          const linkRowsFallback = await supabase
+            .from("student_badges")
+            .select("badge_id")
+            .eq("user_id", userId);
+
+          linkRows = linkRowsFallback.data as GenericRecord[] | null;
+          linkError = linkRowsFallback.error;
+        }
+
+        if (linkError) {
+          return { data: null, error: linkError };
+        }
+
+        const badgeIds = Array.from(
+          new Set(
+            (linkRows ?? [])
+              .map((row) => String(row.badge_id ?? "").trim())
+              .filter((id) => id.length > 0),
+          ),
+        );
+
+        if (badgeIds.length === 0) {
+          return { data: [], error: null };
+        }
+
+        const badges = await supabase
+          .from("badges")
+          .select("*")
+          .in("id", badgeIds)
+          .order("name", { ascending: true });
+
+        if (badges.error) {
+          return { data: null, error: badges.error };
+        }
+
+        return { data: (badges.data ?? []) as GenericRecord[], error: null };
+      } catch (error) {
+        return { data: null, error: asError(error) };
+      }
+    },
+
+    async syncUnlockedBadges(
+      userId: string,
+    ): Promise<QueryResult<GenericRecord>> {
+      try {
+        const [allBadgesResult, summaryResult, currentBadgesResult] =
+          await Promise.all([
+            this.getAll(),
+            supabaseQueries.profiles.getProfileSummary(userId),
+            this.getUserBadges(userId),
+          ]);
+
+        const firstError =
+          allBadgesResult.error ??
+          summaryResult.error ??
+          currentBadgesResult.error;
+
+        if (firstError) {
+          return { data: null, error: firstError };
+        }
+
+        const allBadges = (allBadgesResult.data ?? []) as GenericRecord[];
+        const currentBadges = (currentBadgesResult.data ?? []) as GenericRecord[];
+        const totalBadges = allBadges.length;
+
+        if (totalBadges === 0) {
+          return {
+            data: {
+              unlockedCount: 0,
+              totalBadges: 0,
+              awardedBadges: [],
+            },
+            error: null,
+          };
+        }
+
+        const summary = (summaryResult.data ?? {}) as GenericRecord;
+        const profile = (summary.profile ?? {}) as GenericRecord;
+
+        const ecoPoints = Math.max(
+          0,
+          toInteger(summary.eco_points ?? profile.eco_points ?? profile.points, 0),
+        );
+
+        const getRequiredPoints = (badge: GenericRecord, index: number) => {
+          const candidates = [
+            badge.required_points,
+            badge.points_required,
+            badge.min_points,
+            badge.unlock_points,
+            badge.eco_points_required,
+            badge.requirement_points,
+          ];
+
+          for (const value of candidates) {
+            const parsed = toInteger(value, -1);
+            if (parsed >= 0) {
+              return parsed;
+            }
+          }
+
+          // Fallback requirement tiers if schema doesn't define requirement fields.
+          return Math.max(0, index * 300);
+        };
+
+        const badgesWithRequirements = allBadges
+          .map((badge, index) => ({
+            badge,
+            requiredPoints: getRequiredPoints(badge, index),
+          }))
+          .sort((a, b) => a.requiredPoints - b.requiredPoints);
+
+        const unlockedBadges = badgesWithRequirements
+          .filter((entry) => ecoPoints >= entry.requiredPoints)
+          .map((entry) => entry.badge);
+        const unlockedCount = unlockedBadges.length;
+        const currentBadgeIds = new Set(
+          currentBadges
+            .map((badge) => String(badge.id ?? "").trim())
+            .filter((id) => id.length > 0),
+        );
+
+        const toAward = unlockedBadges.filter((badge) => {
+          const id = String(badge.id ?? "").trim();
+          return id.length > 0 && !currentBadgeIds.has(id);
+        });
+
+        if (toAward.length === 0) {
+          return {
+            data: {
+              unlockedCount,
+              totalBadges,
+              awardedBadges: [],
+            },
+            error: null,
+          };
+        }
+
+        const awardResponses = await Promise.all(
+          toAward.map((badge) => {
+            const badgeId = String(badge.id ?? "").trim();
+            return this.awardBadge(userId, badgeId).then((res) => ({
+              ...res,
+              badge,
+            }));
+          }),
+        );
+
+        const awardedBadges = awardResponses
+          .filter((item) => !item.error)
+          .map((item) => item.badge);
+
+        const awardError = awardResponses.find((item) => item.error)?.error ?? null;
+        if (awardError) {
+          return { data: null, error: awardError };
+        }
+
+        return {
+          data: {
+            unlockedCount,
+            totalBadges,
+            awardedBadges,
+          },
+          error: null,
+        };
       } catch (error) {
         return { data: null, error: asError(error) };
       }

@@ -51,8 +51,12 @@ export default function ProfileScreen() {
   const [topUsers, setTopUsers] = useState<GenericRecord[]>([]);
   const [notifications, setNotifications] = useState<GenericRecord[]>([]);
   const [badges, setBadges] = useState<GenericRecord[]>([]);
+  const [userBadges, setUserBadges] = useState<GenericRecord[]>([]);
+  const [ecoPoints, setEcoPoints] = useState(0);
   const [rank, setRank] = useState(0);
   const [errorMessage, setErrorMessage] = useState("");
+  const [schoolName, setSchoolName] = useState("");
+  const [teacher, setTeacher] = useState<GenericRecord | null>(null);
 
   const unreadNotifications = notifications.filter(
     (entry) => !Boolean(entry.is_read),
@@ -66,16 +70,41 @@ export default function ProfileScreen() {
 
     setErrorMessage("");
 
-    const [topResponse, rankResponse, notificationsResponse, badgesResponse] =
+    const [
+      topResponse,
+      rankResponse,
+      notificationsResponse,
+      badgesResponse,
+      userBadgesResponse,
+      summaryResponse,
+      schoolTeacherResponse,
+    ] =
       await Promise.all([
-        retryQuery(() => supabaseQueries.leaderboard.getTopUsers(10), {
+        retryQuery(
+          () =>
+            supabaseQueries.leaderboard.getTopUsers(
+              10,
+              "all_time",
+              "my_school",
+              user.id,
+            ),
+          {
           operationName: "profile_leaderboard_getTopUsers",
           context: { screen: "profile" },
-        }),
-        retryQuery(() => supabaseQueries.leaderboard.getRank(user.id), {
+          },
+        ),
+        retryQuery(
+          () =>
+            supabaseQueries.leaderboard.getRank(
+              user.id,
+              "all_time",
+              "my_school",
+            ),
+          {
           operationName: "profile_leaderboard_getRank",
           context: { screen: "profile" },
-        }),
+          },
+        ),
         retryQuery(
           () => supabaseQueries.notifications.getUserNotifications(user.id),
           {
@@ -87,13 +116,31 @@ export default function ProfileScreen() {
           operationName: "profile_badges_getAll",
           context: { screen: "profile" },
         }),
+        retryQuery(() => supabaseQueries.badges.getUserBadges(user.id), {
+          operationName: "profile_badges_getUserBadges",
+          context: { screen: "profile" },
+        }),
+        retryQuery(() => supabaseQueries.profiles.getProfileSummary(user.id), {
+          operationName: "profile_profiles_getProfileSummary",
+          context: { screen: "profile" },
+        }),
+        retryQuery(
+          () => supabaseQueries.profiles.getSchoolAndTeacher(user.id),
+          {
+            operationName: "profile_profiles_getSchoolAndTeacher",
+            context: { screen: "profile" },
+          },
+        ),
       ]);
 
     const firstError =
       topResponse.error ??
       rankResponse.error ??
       notificationsResponse.error ??
-      badgesResponse.error;
+      badgesResponse.error ??
+      userBadgesResponse.error ??
+      summaryResponse.error ??
+      schoolTeacherResponse.error;
 
     if (firstError) {
       setErrorMessage(
@@ -113,6 +160,38 @@ export default function ProfileScreen() {
     );
     setNotifications((notificationsResponse.data ?? []) as GenericRecord[]);
     setBadges((badgesResponse.data ?? []) as GenericRecord[]);
+    const summaryData = (summaryResponse.data ?? {}) as GenericRecord;
+    const summaryProfile = (summaryData.profile ?? {}) as GenericRecord;
+    setEcoPoints(
+      toNumber(summaryData, ["eco_points"]) ||
+        toNumber(summaryProfile, ["eco_points", "points"]),
+    );
+
+    // Auto-sync unlock state based on eco points, then refresh user badges.
+    await retryQuery(() => supabaseQueries.badges.syncUnlockedBadges(user.id), {
+      operationName: "profile_badges_syncUnlockedBadges_auto",
+      context: { screen: "profile" },
+    });
+
+    const latestUserBadgesResponse = await retryQuery(
+      () => supabaseQueries.badges.getUserBadges(user.id),
+      {
+        operationName: "profile_badges_getUserBadges_afterSync",
+        context: { screen: "profile" },
+      },
+    );
+
+    setUserBadges(
+      ((latestUserBadgesResponse.data ?? userBadgesResponse.data ?? []) as GenericRecord[]),
+    );
+    
+    // Set school and teacher data
+    const schoolTeacherData = schoolTeacherResponse.data as GenericRecord | null;
+    if (schoolTeacherData) {
+      setSchoolName(String(schoolTeacherData.schoolName ?? ""));
+      setTeacher((schoolTeacherData.teacher as GenericRecord | null) ?? null);
+    }
+    
     setLoading(false);
   }, [user]);
 
@@ -155,29 +234,59 @@ export default function ProfileScreen() {
     void loadProfileData();
   };
 
-  const awardFirstBadge = async () => {
-    if (!user || badges.length === 0) {
-      return;
-    }
-
-    const firstBadgeId = String(badges[0].id ?? "");
-    if (!firstBadgeId) {
-      Alert.alert("Cannot award badge", "Badge id missing.");
+  const syncUnlockedBadges = async () => {
+    if (!user) {
       return;
     }
 
     const response = await retryQuery(() =>
-      supabaseQueries.badges.awardBadge(user.id, firstBadgeId),
+      supabaseQueries.badges.syncUnlockedBadges(user.id),
     );
+
     if (response.error) {
       Alert.alert(
-        "Badge award failed",
-        getErrorMessage(response.error, "Failed to award badge."),
+        "Badge sync failed",
+        getErrorMessage(response.error, "Failed to sync unlocked badges."),
       );
-    } else {
-      Alert.alert("Success", "Badge awarded successfully.");
+      return;
     }
+
+    const payload = (response.data ?? {}) as GenericRecord;
+    const newlyAwarded = ((payload.awardedBadges ?? []) as GenericRecord[]).length;
+    const unlockedCount = Number(payload.unlockedCount ?? 0);
+
+    Alert.alert(
+      "Badges Updated",
+      newlyAwarded > 0
+        ? `${newlyAwarded} new badge${newlyAwarded > 1 ? "s" : ""} awarded. Unlocked: ${unlockedCount}.`
+        : `No new badges to award. Unlocked: ${unlockedCount}.`,
+    );
+
+    void loadProfileData();
   };
+
+  const getBadgeRequiredPoints = useCallback(
+    (badge: GenericRecord, index: number) => {
+      const candidates = [
+        badge.required_points,
+        badge.points_required,
+        badge.min_points,
+        badge.unlock_points,
+        badge.eco_points_required,
+        badge.requirement_points,
+      ];
+
+      for (const value of candidates) {
+        const numeric = Number(value);
+        if (Number.isFinite(numeric) && numeric >= 0) {
+          return numeric;
+        }
+      }
+
+      return index * 300;
+    },
+    [],
+  );
 
   const markAllRead = async () => {
     const unread = notifications.filter((entry) => !Boolean(entry.is_read));
@@ -242,7 +351,37 @@ export default function ProfileScreen() {
         </GlassCard>
       </Animated.View>
 
-      <Animated.View entering={FadeInDown.delay(60).duration(350)}>
+      <Animated.View entering={FadeInDown.delay(110).duration(350)}>
+        <GlassCard style={styles.infoCard}>
+          <ThemedText type="subtitle" style={styles.sectionTitle}>
+            🏫 School Information
+          </ThemedText>
+          <View style={styles.infoContent}>
+            <View style={styles.infoRow}>
+              <ThemedText style={styles.infoLabel}>College:</ThemedText>
+              <ThemedText style={styles.infoValue}>
+                {schoolName || "Not assigned"}
+              </ThemedText>
+            </View>
+            <View style={styles.infoRow}>
+              <ThemedText style={styles.infoLabel}>Teacher:</ThemedText>
+              <ThemedText style={styles.infoValue}>
+                {teacher ? String(teacher.name ?? teacher.email ?? "Not assigned") : "Not assigned"}
+              </ThemedText>
+            </View>
+            {teacher && teacher.email ? (
+              <View style={styles.infoRow}>
+                <ThemedText style={styles.infoLabel}>Email:</ThemedText>
+                <ThemedText style={styles.infoValue}>
+                  {String(teacher.email ?? "")}
+                </ThemedText>
+              </View>
+            ) : null}
+          </View>
+        </GlassCard>
+      </Animated.View>
+
+      <Animated.View entering={FadeInDown.delay(105).duration(350)}>
         <Pressable
           style={styles.reloadButton}
           onPress={() => void loadProfileData()}
@@ -253,7 +392,7 @@ export default function ProfileScreen() {
         </Pressable>
       </Animated.View>
 
-      <Animated.View entering={FadeInDown.delay(105).duration(350)}>
+      <Animated.View entering={FadeInDown.delay(150).duration(350)}>
         <GlassCard style={styles.appearanceCard}>
           <ThemedText type="subtitle" style={styles.sectionTitle}>
             🎨 Appearance
@@ -410,16 +549,62 @@ export default function ProfileScreen() {
           <ThemedText style={styles.badgeCount}>
             {badges.length} badge template{badges.length !== 1 ? "s" : ""} available
           </ThemedText>
+          <ThemedText style={styles.badgeCount}>
+            {userBadges.length} unlocked
+          </ThemedText>
+          <ThemedText style={styles.badgeCount}>{ecoPoints} eco points</ThemedText>
+
+          {badges.length === 0 ? (
+            <ThemedText style={styles.emptyText}>
+              No badges available.
+            </ThemedText>
+          ) : (
+            <View style={styles.badgeGrid}>
+              {badges.map((badge, index) => {
+                const badgeName = String(badge.name ?? `Badge ${index + 1}`).trim();
+                const badgeDescription = String(
+                  badge.description ?? badge.criteria ?? "Keep learning to earn more rewards.",
+                ).trim();
+                const badgeId = String(badge.id ?? "").trim();
+                const requiredPoints = getBadgeRequiredPoints(badge, index);
+                const isUnlockedByPoints = ecoPoints >= requiredPoints;
+                const isAwarded = userBadges.some(
+                  (ownedBadge) => String(ownedBadge.id ?? "").trim() === badgeId,
+                );
+                const isUnlocked = isAwarded || isUnlockedByPoints;
+
+                return (
+                  <View
+                    key={`${String(badge.id ?? badgeName)}-${index}`}
+                    style={[styles.badgeItem, !isUnlocked ? styles.badgeItemLocked : null]}
+                  >
+                    <ThemedText style={styles.badgeItemTitle} numberOfLines={1}>
+                      {isUnlocked ? "🏅" : "🔒"} {badgeName}
+                    </ThemedText>
+                    <ThemedText style={styles.badgeItemDescription} numberOfLines={2}>
+                      {badgeDescription}
+                    </ThemedText>
+                    <ThemedText style={styles.badgeRequirementText}>
+                      {isUnlocked
+                        ? `Unlocked at ${requiredPoints} points`
+                        : `Need ${requiredPoints} eco points`}
+                    </ThemedText>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+
           <Pressable
             style={styles.primaryButton}
-            onPress={() => void awardFirstBadge()}
+            onPress={() => void syncUnlockedBadges()}
           >
             <LinearGradient
               colors={["#f59e0b", "#fbbf24"]}
               style={styles.primaryButtonGradient}
             >
               <ThemedText style={styles.primaryButtonLabel}>
-                🎁 Award First Badge
+                🎁 Sync Unlocked Badges
               </ThemedText>
             </LinearGradient>
           </Pressable>
@@ -657,6 +842,39 @@ const styles = StyleSheet.create({
     fontSize: 13,
     opacity: 0.7,
   },
+  badgeGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  badgeItem: {
+    width: "48%",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.25)",
+    backgroundColor: "rgba(245, 158, 11, 0.08)",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  badgeItemLocked: {
+    opacity: 0.72,
+    borderColor: "rgba(107, 114, 128, 0.25)",
+    backgroundColor: "rgba(107, 114, 128, 0.08)",
+  },
+  badgeItemTitle: {
+    fontWeight: "700",
+    fontSize: 12,
+  },
+  badgeItemDescription: {
+    fontSize: 11,
+    opacity: 0.75,
+  },
+  badgeRequirementText: {
+    fontSize: 10,
+    fontWeight: "600",
+    opacity: 0.75,
+  },
   primaryButton: {
     minHeight: 48,
     borderRadius: 12,
@@ -686,5 +904,31 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontWeight: "700",
     fontSize: 14,
+  },
+  infoCard: {
+    gap: 12,
+  },
+  infoContent: {
+    gap: 10,
+  },
+  infoRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: "rgba(59, 130, 246, 0.05)",
+  },
+  infoLabel: {
+    fontWeight: "600",
+    fontSize: 13,
+    flex: 0.35,
+  },
+  infoValue: {
+    flex: 0.65,
+    textAlign: "right",
+    fontSize: 13,
+    opacity: 0.8,
   },
 });
