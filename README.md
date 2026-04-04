@@ -127,6 +127,63 @@ Practical setup note:
 
 - Configure both repositories with the same Supabase URL and keys for the same environment (dev/staging/prod) to keep student-teacher data in sync.
 
+### Integration Contract (Student <-> Teacher)
+
+- Auth and identity:
+  - `auth.users.id` is the canonical identity for both apps.
+  - `students.id` and `profiles.id` map to the same auth user id.
+- Teacher assignment:
+  - `students.teacher_id` and `profiles.teacher_id` store the assigned teacher's auth user id.
+  - Teacher-facing queries should treat this as the ownership boundary for review queues.
+- Mission proof and review lifecycle:
+  - Student submits proof (photo/location/notes) and status moves to `pending` or `submitted` depending on schema path.
+  - Teacher review updates status to `approved` or `rejected` and can add feedback.
+  - Student app reads refreshed status and feedback and updates notifications/profile metrics.
+
+### Required Shared Tables and Fields
+
+- `students`
+  - Required: `id`, `role`, `school_id`, `teacher_id`, `eco_points`, `streak_days`
+- `profiles`
+  - Required: `id`, `role`, `school_id`, `teacher_id`, `eco_points` (or `points` compatibility)
+- `submissions` (or compatibility mirror `mission_submissions`)
+  - Required: `id`, `user_id`, `mission_id`, `status`, `photo_url` (or proof compatibility columns), `latitude`, `longitude`, `reviewed_by`, `feedback`
+- `notifications`
+  - Recommended: `is_read`, `read_at` (student query layer has fallback if `read_at` is absent)
+
+### Migration Prerequisites
+
+- Ensure all migrations are applied in order for the active environment.
+- Teacher assignment support:
+  - `supabase/migrations/17_add_teacher_assignment.sql`
+  - `supabase/migrations/19_add_teacher_assignment_missing_columns.sql` (safe backfill for environments that missed migration 17)
+- Proof validation hardening:
+  - `supabase/migrations/18_proof_submission_validation.sql`
+
+### Cross-Repo Environment Rules
+
+- Student repo and teacher repo must point to the same Supabase project per environment.
+- Keep environment separation strict:
+  - dev student app -> dev teacher app -> dev Supabase
+  - staging student app -> staging teacher app -> staging Supabase
+  - prod student app -> prod teacher app -> prod Supabase
+- Do not mix anon keys or URLs across environments.
+
+### Common Integration Failures
+
+- Error: `column students.teacher_id does not exist`
+  - Cause: migration drift in the target Supabase project.
+  - Fix: apply `supabase/migrations/19_add_teacher_assignment_missing_columns.sql`.
+- Student cannot see assigned teacher in profile:
+  - Verify `profiles.teacher_id` is populated for that student.
+  - Verify teacher user has `role = 'teacher'` and same `school_id`.
+- Teacher cannot see submissions:
+  - Verify review-side RLS allows access to assigned students/school.
+  - Verify submission statuses are reaching `pending`/`submitted`.
+- Student status not updating after teacher action:
+  - Verify Realtime subscription is active.
+  - Trigger a manual refresh to validate data persistence vs subscription delay.
+
 ## Troubleshooting
 
 ### Notification error about `read_at`
@@ -155,4 +212,3 @@ Current query implementation now safely handles this by retrying without `read_a
 - Lesson detail page handles read -> complete flow
 - Topic completion can trigger AI quiz + rewards
 - Notification mark-as-read schema fallback implemented
-
