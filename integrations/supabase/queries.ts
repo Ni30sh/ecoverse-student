@@ -1,4 +1,4 @@
-import { supabase } from "@/lib/supabase/client";
+import { supabase } from "../../lib/supabase/client";
 
 // Types - using 'any' for flexibility until proper types are defined
 type TablesInsert<T extends string> = Record<string, any>;
@@ -15,6 +15,7 @@ type ProfileWithSchoolName = {
 /**
  * Normalize profile data - handle school joins
  */
+
 function normalizeProfileSchool(row: any): ProfileWithSchoolName | null {
   if (!row) return null;
 
@@ -117,9 +118,9 @@ export const supabaseQueries = {
           .eq("role", "student");
 
         if (error) throw error;
-        return (data || []).map(normalizeProfileSchool).filter(
-          (profile): profile is ProfileWithSchoolName => profile !== null,
-        );
+        return (data || [])
+          .map(normalizeProfileSchool)
+          .filter(Boolean) as ProfileWithSchoolName[];
       } catch (error) {
         console.error("[supabaseQueries] Failed to get all profiles:", error);
         return [];
@@ -147,9 +148,9 @@ export const supabaseQueries = {
           .eq("role", "student");
 
         if (error) throw error;
-        return (data || []).map(normalizeProfileSchool).filter(
-          (profile): profile is ProfileWithSchoolName => profile !== null,
-        );
+        return (data || [])
+          .map(normalizeProfileSchool)
+          .filter(Boolean) as ProfileWithSchoolName[];
       } catch (error) {
         console.error(
           "[supabaseQueries] Failed to get profiles by role:",
@@ -627,46 +628,6 @@ export const supabaseQueries = {
           .select()
           .single();
 
-        const canonicalNotNullSubmittedAt =
-          !!error &&
-          /submitted_at/i.test(String(error.message ?? "")) &&
-          /not-null|null value/i.test(String(error.message ?? ""));
-
-        const canonicalInvalidStatus =
-          !!error &&
-          /status/i.test(String(error.message ?? "")) &&
-          /(constraint|check)/i.test(String(error.message ?? ""));
-
-        if (canonicalNotNullSubmittedAt) {
-          const compat = await supabase
-            .from("submissions")
-            .upsert(
-              { ...payload, submitted_at: new Date().toISOString() },
-              { onConflict: "user_id,mission_id" },
-            )
-            .select()
-            .single();
-
-          if (!compat.error) return compat.data;
-        }
-
-        if (canonicalInvalidStatus) {
-          const compat = await supabase
-            .from("submissions")
-            .upsert(
-              {
-                ...payload,
-                status: "pending",
-                submitted_at: new Date().toISOString(),
-              },
-              { onConflict: "user_id,mission_id" },
-            )
-            .select()
-            .single();
-
-          if (!compat.error) return compat.data;
-        }
-
         if (!error) return data;
 
         const legacy = await supabase
@@ -674,46 +635,6 @@ export const supabaseQueries = {
           .upsert(payload, { onConflict: "user_id,mission_id" })
           .select()
           .single();
-
-        const legacyNotNullSubmittedAt =
-          !!legacy.error &&
-          /submitted_at/i.test(String(legacy.error.message ?? "")) &&
-          /not-null|null value/i.test(String(legacy.error.message ?? ""));
-
-        const legacyInvalidStatus =
-          !!legacy.error &&
-          /status/i.test(String(legacy.error.message ?? "")) &&
-          /(constraint|check)/i.test(String(legacy.error.message ?? ""));
-
-        if (legacyNotNullSubmittedAt) {
-          const compatLegacy = await supabase
-            .from("mission_submissions")
-            .upsert(
-              { ...payload, submitted_at: new Date().toISOString() },
-              { onConflict: "user_id,mission_id" },
-            )
-            .select()
-            .single();
-
-          if (!compatLegacy.error) return compatLegacy.data;
-        }
-
-        if (legacyInvalidStatus) {
-          const compatLegacy = await supabase
-            .from("mission_submissions")
-            .upsert(
-              {
-                ...payload,
-                status: "pending",
-                submitted_at: new Date().toISOString(),
-              },
-              { onConflict: "user_id,mission_id" },
-            )
-            .select()
-            .single();
-
-          if (!compatLegacy.error) return compatLegacy.data;
-        }
 
         if (legacy.error) throw legacy.error;
         return legacy.data;
@@ -1315,7 +1236,9 @@ export const supabaseQueries = {
           .eq("user_id", userId);
 
         if (error) throw error;
-        return data?.map((ub: any) => ub.badges).filter(Boolean) || [];
+        return (
+          data?.map((ub: { badges: any }) => ub.badges).filter(Boolean) || []
+        );
       } catch (error) {
         console.error("[supabaseQueries] Failed to get user badges:", error);
         return [];

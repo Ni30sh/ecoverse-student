@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createClient } from "@supabase/supabase-js";
+import { Buffer } from "buffer";
 import { Platform } from "react-native";
 
 const supabaseUrl =
@@ -8,6 +9,53 @@ const supabaseAnonKey =
   process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ??
   process.env.VITE_SUPABASE_ANON_KEY;
 const EXPECTED_PROJECT_REF = "vzwvnhgorvqnwluzxtkk";
+
+function extractRefFromUrl(url?: string | null) {
+  if (!url) {
+    return null;
+  }
+
+  const match = url.match(/^https:\/\/([a-z0-9-]+)\.supabase\.co/i);
+  return match?.[1] ?? null;
+}
+
+function decodeJwtPayload(
+  token?: string | null,
+): Record<string, unknown> | null {
+  if (!token) {
+    return null;
+  }
+
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) {
+      return null;
+    }
+
+    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const json = Buffer.from(payload, "base64").toString("utf8");
+    return JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+export function getSupabaseProjectDiagnostics() {
+  const urlRef = extractRefFromUrl(supabaseUrl);
+  const keyPayload = decodeJwtPayload(supabaseAnonKey);
+  const keyRef = String(keyPayload?.ref ?? "").trim() || null;
+  const matchesExpected =
+    urlRef === EXPECTED_PROJECT_REF &&
+    (keyRef === EXPECTED_PROJECT_REF || keyRef === null);
+
+  return {
+    supabaseUrl,
+    expectedRef: EXPECTED_PROJECT_REF,
+    urlRef,
+    keyRef,
+    matchesExpected,
+  };
+}
 
 if (!supabaseUrl || !supabaseAnonKey) {
   throw new Error("Missing Supabase environment variables.");
@@ -60,11 +108,11 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 });
 
 if (__DEV__) {
-  const refMatch = supabaseUrl.match(/^https:\/\/([a-z0-9-]+)\.supabase\.co/i);
-  const activeRef = refMatch?.[1] ?? "unknown";
+  const diagnostics = getSupabaseProjectDiagnostics();
   console.log("[supabase-project-check] mobile target", {
-    expectedRef: EXPECTED_PROJECT_REF,
-    activeRef,
-    matches: activeRef === EXPECTED_PROJECT_REF,
+    expectedRef: diagnostics.expectedRef,
+    activeRef: diagnostics.urlRef ?? "unknown",
+    keyRef: diagnostics.keyRef ?? "unknown",
+    matches: diagnostics.matchesExpected,
   });
 }

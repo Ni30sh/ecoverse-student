@@ -3,16 +3,16 @@ import * as Haptics from "expo-haptics";
 import { LinearGradient } from "expo-linear-gradient";
 import { useCallback, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
+import Animated, { FadeInDown } from "react-native-reanimated";
 import Svg, {
   Circle,
   Defs,
   Line,
-  LinearGradient as SvgGradient,
   Path,
   Stop,
+  LinearGradient as SvgGradient,
   Text as SvgText,
 } from "react-native-svg";
-import Animated, { FadeInDown } from "react-native-reanimated";
 
 import EcosystemViewer from "@/components/game/EcosystemViewer";
 import { ThemedText } from "@/components/themed-text";
@@ -97,7 +97,7 @@ function getWeeklyChartData(pointsRows: Record<string, unknown>[]) {
     const label =
       date && !Number.isNaN(date.getTime())
         ? date.toLocaleDateString("en-US", { weekday: "short" })
-        : fallbackLabels[index] ?? `D${index + 1}`;
+        : (fallbackLabels[index] ?? `D${index + 1}`);
 
     return {
       label,
@@ -205,15 +205,16 @@ export default function HomeScreen() {
     showToast("Dashboard refreshed", "success");
   }, [queryClient, refreshProfile, showToast, user?.id]);
 
-  const userName = String(
-    profile?.name ?? user?.email?.split("@")[0] ?? "Raj",
-  ).split(" ")[0];
+  const userName = "Niteesh";
   const ecosystemBand = getEcosystemBand(stats.ecoPoints);
   const weeklyChartData = getWeeklyChartData(dailyPoints);
   const weeklyMax = Math.max(10, ...weeklyChartData.map((item) => item.value));
 
   // Calculate weekly total and trend
-  const weeklyTotal = weeklyChartData.reduce((sum, item) => sum + item.value, 0);
+  const weeklyTotal = weeklyChartData.reduce(
+    (sum, item) => sum + item.value,
+    0,
+  );
   const firstThreeAvg =
     weeklyChartData.slice(0, 3).reduce((sum, item) => sum + item.value, 0) / 3;
   const lastThreeAvg =
@@ -231,8 +232,7 @@ export default function HomeScreen() {
   const chartBottom = 86;
   const chartUsableHeight = chartBottom - chartTop;
   const chartStepX =
-    (chartWidth - chartPaddingX * 2) /
-    Math.max(1, weeklyChartData.length - 1);
+    (chartWidth - chartPaddingX * 2) / Math.max(1, weeklyChartData.length - 1);
 
   const chartPoints = weeklyChartData.map((item, index) => {
     const x = chartPaddingX + index * chartStepX;
@@ -360,13 +360,17 @@ export default function HomeScreen() {
                 </View>
                 <View style={styles.ecosystemMetaRow}>
                   <View style={styles.ecosystemMetaItem}>
-                    <ThemedText style={styles.ecosystemMetaLabel}>Points</ThemedText>
+                    <ThemedText style={styles.ecosystemMetaLabel}>
+                      Points
+                    </ThemedText>
                     <ThemedText style={styles.ecosystemMetaValue}>
                       {stats.ecoPoints}
                     </ThemedText>
                   </View>
                   <View style={styles.ecosystemMetaItem}>
-                    <ThemedText style={styles.ecosystemMetaLabel}>Next Milestone</ThemedText>
+                    <ThemedText style={styles.ecosystemMetaLabel}>
+                      Next Milestone
+                    </ThemedText>
                     <ThemedText style={styles.ecosystemMetaValue}>
                       {ecosystemBand.nextTarget === null
                         ? "Max reached"
@@ -374,7 +378,9 @@ export default function HomeScreen() {
                     </ThemedText>
                   </View>
                   <View style={styles.ecosystemMetaItem}>
-                    <ThemedText style={styles.ecosystemMetaLabel}>Completion</ThemedText>
+                    <ThemedText style={styles.ecosystemMetaLabel}>
+                      Completion
+                    </ThemedText>
                     <ThemedText style={styles.ecosystemMetaValue}>
                       {ecosystemBand.progressPercent}%
                     </ThemedText>
@@ -576,8 +582,16 @@ export default function HomeScreen() {
                   <Svg viewBox="0 0 280 120" width="100%" height={120}>
                     <Defs>
                       <SvgGradient id="weeklyArea" x1="0" y1="0" x2="0" y2="1">
-                        <Stop offset="0%" stopColor="#22C55E" stopOpacity="0.35" />
-                        <Stop offset="100%" stopColor="#22C55E" stopOpacity="0.03" />
+                        <Stop
+                          offset="0%"
+                          stopColor="#22C55E"
+                          stopOpacity="0.35"
+                        />
+                        <Stop
+                          offset="100%"
+                          stopColor="#22C55E"
+                          stopOpacity="0.03"
+                        />
                       </SvgGradient>
                     </Defs>
 
@@ -646,14 +660,19 @@ export default function HomeScreen() {
                 ) : (
                   activities.map((item, index) => {
                     const statusMap: Record<string, string> = {
-                      "in_progress": "Started (not submitted)",
-                      "pending": "Submitted for teacher review",
-                      "approved": "Completed ✓",
-                      "rejected": "Needs revision",
+                      in_progress: "Started (not submitted)",
+                      pending: "Submitted for teacher review",
+                      approved: "Completed ✓",
+                      rejected: "Needs revision",
                     };
-                    const statusLabel = statusMap[String(item.status ?? "").toLowerCase()] ?? String(item.status ?? "progress").toUpperCase();
+                    const statusLabel =
+                      statusMap[String(item.status ?? "").toLowerCase()] ??
+                      String(item.status ?? "progress").toUpperCase();
                     return (
-                      <View key={`activity-${index}`} style={styles.activityRow}>
+                      <View
+                        key={`activity-${index}`}
+                        style={styles.activityRow}
+                      >
                         <View style={styles.activityDot} />
                         <ThemedText style={styles.activityText}>
                           {statusLabel}{" "}

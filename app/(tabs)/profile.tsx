@@ -1,4 +1,5 @@
 import { useFocusEffect } from "@react-navigation/native";
+import { LinearGradient } from "expo-linear-gradient";
 import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -8,7 +9,6 @@ import {
   StyleSheet,
   View,
 } from "react-native";
-import { LinearGradient } from "expo-linear-gradient";
 import Animated, { FadeInDown } from "react-native-reanimated";
 
 import { ThemedText } from "@/components/themed-text";
@@ -78,60 +78,52 @@ export default function ProfileScreen() {
       userBadgesResponse,
       summaryResponse,
       schoolTeacherResponse,
-    ] =
-      await Promise.all([
-        retryQuery(
-          () =>
-            supabaseQueries.leaderboard.getTopUsers(
-              10,
-              "all_time",
-              "my_school",
-              user.id,
-            ),
-          {
+    ] = await Promise.all([
+      retryQuery(
+        () =>
+          supabaseQueries.leaderboard.getTopUsers(
+            10,
+            "all_time",
+            "my_school",
+            user.id,
+          ),
+        {
           operationName: "profile_leaderboard_getTopUsers",
           context: { screen: "profile" },
-          },
-        ),
-        retryQuery(
-          () =>
-            supabaseQueries.leaderboard.getRank(
-              user.id,
-              "all_time",
-              "my_school",
-            ),
-          {
+        },
+      ),
+      retryQuery(
+        () =>
+          supabaseQueries.leaderboard.getRank(user.id, "all_time", "my_school"),
+        {
           operationName: "profile_leaderboard_getRank",
           context: { screen: "profile" },
-          },
-        ),
-        retryQuery(
-          () => supabaseQueries.notifications.getUserNotifications(user.id),
-          {
-            operationName: "profile_notifications_getUserNotifications",
-            context: { screen: "profile" },
-          },
-        ),
-        retryQuery(() => supabaseQueries.badges.getAll(), {
-          operationName: "profile_badges_getAll",
+        },
+      ),
+      retryQuery(
+        () => supabaseQueries.notifications.getUserNotifications(user.id),
+        {
+          operationName: "profile_notifications_getUserNotifications",
           context: { screen: "profile" },
-        }),
-        retryQuery(() => supabaseQueries.badges.getUserBadges(user.id), {
-          operationName: "profile_badges_getUserBadges",
-          context: { screen: "profile" },
-        }),
-        retryQuery(() => supabaseQueries.profiles.getProfileSummary(user.id), {
-          operationName: "profile_profiles_getProfileSummary",
-          context: { screen: "profile" },
-        }),
-        retryQuery(
-          () => supabaseQueries.profiles.getSchoolAndTeacher(user.id),
-          {
-            operationName: "profile_profiles_getSchoolAndTeacher",
-            context: { screen: "profile" },
-          },
-        ),
-      ]);
+        },
+      ),
+      retryQuery(() => supabaseQueries.badges.getAll(), {
+        operationName: "profile_badges_getAll",
+        context: { screen: "profile" },
+      }),
+      retryQuery(() => supabaseQueries.badges.getUserBadges(user.id), {
+        operationName: "profile_badges_getUserBadges",
+        context: { screen: "profile" },
+      }),
+      retryQuery(() => supabaseQueries.profiles.getProfileSummary(user.id), {
+        operationName: "profile_profiles_getProfileSummary",
+        context: { screen: "profile" },
+      }),
+      retryQuery(() => supabaseQueries.profiles.getSchoolAndTeacher(user.id), {
+        operationName: "profile_profiles_getSchoolAndTeacher",
+        context: { screen: "profile" },
+      }),
+    ]);
 
     const firstError =
       topResponse.error ??
@@ -182,16 +174,19 @@ export default function ProfileScreen() {
     );
 
     setUserBadges(
-      ((latestUserBadgesResponse.data ?? userBadgesResponse.data ?? []) as GenericRecord[]),
+      (latestUserBadgesResponse.data ??
+        userBadgesResponse.data ??
+        []) as GenericRecord[],
     );
-    
+
     // Set school and teacher data
-    const schoolTeacherData = schoolTeacherResponse.data as GenericRecord | null;
+    const schoolTeacherData =
+      schoolTeacherResponse.data as GenericRecord | null;
     if (schoolTeacherData) {
       setSchoolName(String(schoolTeacherData.schoolName ?? ""));
       setTeacher((schoolTeacherData.teacher as GenericRecord | null) ?? null);
     }
-    
+
     setLoading(false);
   }, [user]);
 
@@ -252,7 +247,8 @@ export default function ProfileScreen() {
     }
 
     const payload = (response.data ?? {}) as GenericRecord;
-    const newlyAwarded = ((payload.awardedBadges ?? []) as GenericRecord[]).length;
+    const newlyAwarded = ((payload.awardedBadges ?? []) as GenericRecord[])
+      .length;
     const unlockedCount = Number(payload.unlockedCount ?? 0);
 
     Alert.alert(
@@ -330,12 +326,13 @@ export default function ProfileScreen() {
             <View>
               <ThemedText type="title" style={styles.profileName}>
                 {String(
-                  profile?.full_name ?? profile?.name ?? user?.email ?? "Student",
+                  profile?.full_name ??
+                    profile?.name ??
+                    user?.email ??
+                    "Student",
                 )}
               </ThemedText>
-              <ThemedText style={styles.profileEmail}>
-                {user?.email}
-              </ThemedText>
+              <ThemedText style={styles.profileEmail}>{user?.email}</ThemedText>
             </View>
             <LinearGradient
               colors={["#8b5cf6", "#d946ef"]}
@@ -366,7 +363,9 @@ export default function ProfileScreen() {
             <View style={styles.infoRow}>
               <ThemedText style={styles.infoLabel}>Teacher:</ThemedText>
               <ThemedText style={styles.infoValue}>
-                {teacher ? String(teacher.name ?? teacher.email ?? "Not assigned") : "Not assigned"}
+                {teacher
+                  ? String(teacher.name ?? teacher.email ?? "Not assigned")
+                  : "Not assigned"}
               </ThemedText>
             </View>
             {teacher && teacher.email ? (
@@ -443,10 +442,7 @@ export default function ProfileScreen() {
       ) : null}
 
       <Animated.View entering={FadeInDown.delay(150).duration(360)}>
-        <LinearGradient
-          colors={["#06b6d4", "#06d6d4"]}
-          style={styles.rankCard}
-        >
+        <LinearGradient colors={["#06b6d4", "#06d6d4"]} style={styles.rankCard}>
           <ThemedText style={styles.rankLabel}>Your Rank</ThemedText>
           <ThemedText style={styles.rankValue}>#{rank || 0}</ThemedText>
         </LinearGradient>
@@ -458,17 +454,22 @@ export default function ProfileScreen() {
             🏆 Top Students
           </ThemedText>
           {topUsers.length === 0 ? (
-            <ThemedText style={styles.emptyText}>No leaderboard data.</ThemedText>
+            <ThemedText style={styles.emptyText}>
+              No leaderboard data.
+            </ThemedText>
           ) : (
             <View style={styles.studentList}>
               {topUsers.slice(0, 5).map((entry, index) => (
-                <View key={`${String(entry.user_id ?? entry.id ?? index)}-${index}`} style={styles.studentRow}>
+                <View
+                  key={`${String(entry.user_id ?? entry.id ?? index)}-${index}`}
+                  style={styles.studentRow}
+                >
                   <ThemedText style={styles.studentRank}>
                     {index + 1}.
                   </ThemedText>
                   <ThemedText style={styles.studentName}>
                     {String(
-                      entry.name ?? entry.full_name ?? entry.email ?? "Student"
+                      entry.name ?? entry.full_name ?? entry.email ?? "Student",
                     )}
                   </ThemedText>
                   <ThemedText style={styles.studentPoints}>
@@ -513,7 +514,9 @@ export default function ProfileScreen() {
                     key={`${id}-${index}`}
                     style={[
                       styles.notificationItem,
-                      isRead ? styles.notificationRead : styles.notificationUnread,
+                      isRead
+                        ? styles.notificationRead
+                        : styles.notificationUnread,
                     ]}
                   >
                     <View style={styles.notificationContent}>
@@ -547,12 +550,15 @@ export default function ProfileScreen() {
             🏅 Badges
           </ThemedText>
           <ThemedText style={styles.badgeCount}>
-            {badges.length} badge template{badges.length !== 1 ? "s" : ""} available
+            {badges.length} badge template{badges.length !== 1 ? "s" : ""}{" "}
+            available
           </ThemedText>
           <ThemedText style={styles.badgeCount}>
             {userBadges.length} unlocked
           </ThemedText>
-          <ThemedText style={styles.badgeCount}>{ecoPoints} eco points</ThemedText>
+          <ThemedText style={styles.badgeCount}>
+            {ecoPoints} eco points
+          </ThemedText>
 
           {badges.length === 0 ? (
             <ThemedText style={styles.emptyText}>
@@ -561,27 +567,38 @@ export default function ProfileScreen() {
           ) : (
             <View style={styles.badgeGrid}>
               {badges.map((badge, index) => {
-                const badgeName = String(badge.name ?? `Badge ${index + 1}`).trim();
+                const badgeName = String(
+                  badge.name ?? `Badge ${index + 1}`,
+                ).trim();
                 const badgeDescription = String(
-                  badge.description ?? badge.criteria ?? "Keep learning to earn more rewards.",
+                  badge.description ??
+                    badge.criteria ??
+                    "Keep learning to earn more rewards.",
                 ).trim();
                 const badgeId = String(badge.id ?? "").trim();
                 const requiredPoints = getBadgeRequiredPoints(badge, index);
                 const isUnlockedByPoints = ecoPoints >= requiredPoints;
                 const isAwarded = userBadges.some(
-                  (ownedBadge) => String(ownedBadge.id ?? "").trim() === badgeId,
+                  (ownedBadge) =>
+                    String(ownedBadge.id ?? "").trim() === badgeId,
                 );
                 const isUnlocked = isAwarded || isUnlockedByPoints;
 
                 return (
                   <View
                     key={`${String(badge.id ?? badgeName)}-${index}`}
-                    style={[styles.badgeItem, !isUnlocked ? styles.badgeItemLocked : null]}
+                    style={[
+                      styles.badgeItem,
+                      !isUnlocked ? styles.badgeItemLocked : null,
+                    ]}
                   >
                     <ThemedText style={styles.badgeItemTitle} numberOfLines={1}>
                       {isUnlocked ? "🏅" : "🔒"} {badgeName}
                     </ThemedText>
-                    <ThemedText style={styles.badgeItemDescription} numberOfLines={2}>
+                    <ThemedText
+                      style={styles.badgeItemDescription}
+                      numberOfLines={2}
+                    >
                       {badgeDescription}
                     </ThemedText>
                     <ThemedText style={styles.badgeRequirementText}>

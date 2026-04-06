@@ -1,7 +1,31 @@
+// Get the teacher for a student's school (by school_id)
+export async function getTeacherForStudentSchool(studentId: string) {
+  // Get the student's school_id
+  const { data: student, error: studentError } = await supabase
+    .from('profiles')
+    .select('school_id')
+    .eq('id', studentId)
+    .maybeSingle();
+  if (studentError || !student || !student.school_id) {
+    return null;
+  }
+  // Find a teacher with the same school_id
+  const { data: teachers, error: teacherError } = await supabase
+    .from('profiles')
+    .select('id, full_name, name, email')
+    .eq('school_id', student.school_id)
+    .eq('role', 'teacher');
+  if (teacherError || !teachers || teachers.length === 0) {
+    return null;
+  }
+  // Return the first teacher found
+  return teachers[0];
+}
 import { PostgrestError, RealtimeChannel } from "@supabase/supabase-js";
 
 import { supabase } from "@/lib/supabase/client";
 import { logTelemetry } from "@/lib/utils/telemetry";
+    export { buildFallbackQuizQuestions, incrementEcoPoints };
 
 type QueryResult<T> = {
   data: T | null;
@@ -1284,7 +1308,7 @@ export const supabaseQueries = {
         if (missionIds.length > 0) {
           const missionsResult = await supabase
             .from("missions")
-            .select("id,title,category,eco_points_reward")
+            .select("id,title,eco_points_reward")
             .in("id", missionIds);
 
           if (!missionsResult.error) {
@@ -1311,20 +1335,7 @@ export const supabaseQueries = {
 
           const missionId = String(submission.mission_id ?? "").trim();
           const mission = missionMap.get(missionId);
-          const category = normalizeTextInput(mission?.category).toLowerCase();
-
-          if (category) {
-            categorySet.add(category);
-          }
-          if (category === "water") {
-            waterMissions += 1;
-          }
-          if (category === "waste") {
-            wasteMissions += 1;
-          }
-          if (category === "planting") {
-            treesPlanted += 1;
-          }
+          // No category field in lessons, skip category logic
         }
 
         const missionsCompleted = approvedUniqueIds.size;
@@ -1525,7 +1536,9 @@ export const supabaseQueries = {
       userId: string,
     ): Promise<QueryResult<GenericRecord>> {
       try {
-        const normalizeTeacher = (row: GenericRecord | null): GenericRecord | null => {
+        const normalizeTeacher = (
+          row: GenericRecord | null,
+        ): GenericRecord | null => {
           if (!row) {
             return null;
           }
@@ -1563,18 +1576,24 @@ export const supabaseQueries = {
           .limit(1)
           .maybeSingle();
 
-        const studentRow =
-          ((studentResult.data ?? profileResult.data ?? null) as GenericRecord | null);
+        const studentRow = (studentResult.data ??
+          profileResult.data ??
+          null) as GenericRecord | null;
 
         if (!studentRow) {
           return {
             data: null,
-            error: studentResult.error ?? profileResult.error ?? new Error("Student not found"),
+            error:
+              studentResult.error ??
+              profileResult.error ??
+              new Error("Student not found"),
           };
         }
 
         const profileRow = profileResult.data as GenericRecord | null;
-        const schoolId = String(profileRow?.school_id ?? studentRow.school_id ?? "").trim();
+        const schoolId = String(
+          profileRow?.school_id ?? studentRow.school_id ?? "",
+        ).trim();
         const assignedTeacherId = String(profileRow?.teacher_id ?? "").trim();
         let schoolName = "";
 
@@ -1584,7 +1603,9 @@ export const supabaseQueries = {
           }
 
           const teacherSchoolId = String(teacherRow.school_id ?? "").trim();
-          return Boolean(schoolId && teacherSchoolId && schoolId === teacherSchoolId);
+          return Boolean(
+            schoolId && teacherSchoolId && schoolId === teacherSchoolId,
+          );
         };
 
         if (!schoolName && schoolId) {
@@ -1628,7 +1649,9 @@ export const supabaseQueries = {
           assignedTeacherStudent.data &&
           isSameSchoolTeacher(assignedTeacherStudent.data as GenericRecord)
         ) {
-          teacher = normalizeTeacher(assignedTeacherStudent.data as GenericRecord);
+          teacher = normalizeTeacher(
+            assignedTeacherStudent.data as GenericRecord,
+          );
         } else {
           const assignedTeacherProfile = await supabase
             .from("profiles")
@@ -1643,7 +1666,9 @@ export const supabaseQueries = {
             assignedTeacherProfile.data &&
             isSameSchoolTeacher(assignedTeacherProfile.data as GenericRecord)
           ) {
-            teacher = normalizeTeacher(assignedTeacherProfile.data as GenericRecord);
+            teacher = normalizeTeacher(
+              assignedTeacherProfile.data as GenericRecord,
+            );
           }
         }
 
@@ -1662,7 +1687,9 @@ export const supabaseQueries = {
             sameSchoolTeacherStudent.data &&
             isSameSchoolTeacher(sameSchoolTeacherStudent.data as GenericRecord)
           ) {
-            teacher = normalizeTeacher(sameSchoolTeacherStudent.data as GenericRecord);
+            teacher = normalizeTeacher(
+              sameSchoolTeacherStudent.data as GenericRecord,
+            );
           } else {
             const sameSchoolTeacherProfile = await supabase
               .from("profiles")
@@ -1675,9 +1702,13 @@ export const supabaseQueries = {
             if (
               !sameSchoolTeacherProfile.error &&
               sameSchoolTeacherProfile.data &&
-              isSameSchoolTeacher(sameSchoolTeacherProfile.data as GenericRecord)
+              isSameSchoolTeacher(
+                sameSchoolTeacherProfile.data as GenericRecord,
+              )
             ) {
-              teacher = normalizeTeacher(sameSchoolTeacherProfile.data as GenericRecord);
+              teacher = normalizeTeacher(
+                sameSchoolTeacherProfile.data as GenericRecord,
+              );
             }
           }
         }
@@ -1849,7 +1880,10 @@ export const supabaseQueries = {
         if (!primary.error || !studentIdFallback.error || !canonical.error) {
           const byKey = new Map<string, GenericRecord>();
 
-          const pushRows = (rows: GenericRecord[], priority: "canonical" | "mission") => {
+          const pushRows = (
+            rows: GenericRecord[],
+            priority: "canonical" | "mission",
+          ) => {
             for (const row of rows) {
               const missionKey = String(row.mission_id ?? "").trim();
               const idKey = String(row.id ?? "").trim();
@@ -1876,7 +1910,10 @@ export const supabaseQueries = {
             const bTime = Date.parse(
               String(b.updated_at ?? b.submitted_at ?? b.created_at ?? ""),
             );
-            return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+            return (
+              (Number.isFinite(bTime) ? bTime : 0) -
+              (Number.isFinite(aTime) ? aTime : 0)
+            );
           });
 
           return {
@@ -1959,10 +1996,13 @@ export const supabaseQueries = {
               updated_at: new Date().toISOString(),
             };
 
-            debugMissionSubmission("create_reactivate_mission_submissions_request", {
-              submissionId: String(existing.data.id ?? ""),
-              payload: reactivatePayload,
-            });
+            debugMissionSubmission(
+              "create_reactivate_mission_submissions_request",
+              {
+                submissionId: String(existing.data.id ?? ""),
+                payload: reactivatePayload,
+              },
+            );
 
             const missionTableReactivation = await supabase
               .from("mission_submissions")
@@ -1972,26 +2012,30 @@ export const supabaseQueries = {
               .select("*")
               .maybeSingle();
 
-            debugMissionSubmission("create_reactivate_mission_submissions_response", {
-              submissionId: String(existing.data.id ?? ""),
-              error: missionTableReactivation.error
-                ? {
-                    message: missionTableReactivation.error.message,
-                    code: missionTableReactivation.error.code,
-                    details: missionTableReactivation.error.details,
-                    hint: missionTableReactivation.error.hint,
-                  }
-                : null,
-              row: missionTableReactivation.data
-                ? {
-                    id: (missionTableReactivation.data as GenericRecord).id,
-                    status: (missionTableReactivation.data as GenericRecord)
-                      .status,
-                    submitted_at: (missionTableReactivation.data as GenericRecord)
-                      .submitted_at,
-                  }
-                : null,
-            });
+            debugMissionSubmission(
+              "create_reactivate_mission_submissions_response",
+              {
+                submissionId: String(existing.data.id ?? ""),
+                error: missionTableReactivation.error
+                  ? {
+                      message: missionTableReactivation.error.message,
+                      code: missionTableReactivation.error.code,
+                      details: missionTableReactivation.error.details,
+                      hint: missionTableReactivation.error.hint,
+                    }
+                  : null,
+                row: missionTableReactivation.data
+                  ? {
+                      id: (missionTableReactivation.data as GenericRecord).id,
+                      status: (missionTableReactivation.data as GenericRecord)
+                        .status,
+                      submitted_at: (
+                        missionTableReactivation.data as GenericRecord
+                      ).submitted_at,
+                    }
+                  : null,
+              },
+            );
 
             if (
               !missionTableReactivation.error &&
@@ -2013,25 +2057,30 @@ export const supabaseQueries = {
               .select("*")
               .maybeSingle();
 
-            debugMissionSubmission("create_reactivate_submissions_fallback_response", {
-              submissionId: String(existing.data.id ?? ""),
-              error: canonicalReactivation.error
-                ? {
-                    message: canonicalReactivation.error.message,
-                    code: canonicalReactivation.error.code,
-                    details: canonicalReactivation.error.details,
-                    hint: canonicalReactivation.error.hint,
-                  }
-                : null,
-              row: canonicalReactivation.data
-                ? {
-                    id: (canonicalReactivation.data as GenericRecord).id,
-                    status: (canonicalReactivation.data as GenericRecord).status,
-                    submitted_at: (canonicalReactivation.data as GenericRecord)
-                      .submitted_at,
-                  }
-                : null,
-            });
+            debugMissionSubmission(
+              "create_reactivate_submissions_fallback_response",
+              {
+                submissionId: String(existing.data.id ?? ""),
+                error: canonicalReactivation.error
+                  ? {
+                      message: canonicalReactivation.error.message,
+                      code: canonicalReactivation.error.code,
+                      details: canonicalReactivation.error.details,
+                      hint: canonicalReactivation.error.hint,
+                    }
+                  : null,
+                row: canonicalReactivation.data
+                  ? {
+                      id: (canonicalReactivation.data as GenericRecord).id,
+                      status: (canonicalReactivation.data as GenericRecord)
+                        .status,
+                      submitted_at: (
+                        canonicalReactivation.data as GenericRecord
+                      ).submitted_at,
+                    }
+                  : null,
+              },
+            );
 
             if (!canonicalReactivation.error && canonicalReactivation.data) {
               return {
@@ -2193,9 +2242,12 @@ export const supabaseQueries = {
           };
         }
 
-        debugMissionSubmission("create_mission_submissions_insert_student_id_request", {
-          payload: { ...insertPayload, student_id: insertPayload.user_id },
-        });
+        debugMissionSubmission(
+          "create_mission_submissions_insert_student_id_request",
+          {
+            payload: { ...insertPayload, student_id: insertPayload.user_id },
+          },
+        );
 
         const fallback = await supabase
           .from("mission_submissions")
@@ -2203,23 +2255,26 @@ export const supabaseQueries = {
           .select("*")
           .maybeSingle();
 
-        debugMissionSubmission("create_mission_submissions_insert_student_id_response", {
-          error: fallback.error
-            ? {
-                message: fallback.error.message,
-                code: fallback.error.code,
-                details: fallback.error.details,
-                hint: fallback.error.hint,
-              }
-            : null,
-          row: fallback.data
-            ? {
-                id: (fallback.data as GenericRecord).id,
-                status: (fallback.data as GenericRecord).status,
-                submitted_at: (fallback.data as GenericRecord).submitted_at,
-              }
-            : null,
-        });
+        debugMissionSubmission(
+          "create_mission_submissions_insert_student_id_response",
+          {
+            error: fallback.error
+              ? {
+                  message: fallback.error.message,
+                  code: fallback.error.code,
+                  details: fallback.error.details,
+                  hint: fallback.error.hint,
+                }
+              : null,
+            row: fallback.data
+              ? {
+                  id: (fallback.data as GenericRecord).id,
+                  status: (fallback.data as GenericRecord).status,
+                  submitted_at: (fallback.data as GenericRecord).submitted_at,
+                }
+              : null,
+          },
+        );
 
         if (!fallback.error) {
           return {
@@ -2267,7 +2322,9 @@ export const supabaseQueries = {
             primary.error ??
             fallback.error ??
             canonicalDiagnostic.error ??
-            new Error("Failed to write mission submission to mission_submissions"),
+            new Error(
+              "Failed to write mission submission to mission_submissions",
+            ),
         };
       } catch (error) {
         debugMissionSubmission("create_exception", {
@@ -2354,7 +2411,8 @@ export const supabaseQueries = {
             row: canonicalFallbackLookup?.data
               ? {
                   id: (canonicalFallbackLookup.data as GenericRecord).id,
-                  status: (canonicalFallbackLookup.data as GenericRecord).status,
+                  status: (canonicalFallbackLookup.data as GenericRecord)
+                    .status,
                   submitted_at: (canonicalFallbackLookup.data as GenericRecord)
                     .submitted_at,
                 }
@@ -2389,37 +2447,37 @@ export const supabaseQueries = {
           {
             name: "submit_mission_proof_p_params",
             run: () =>
-            supabase.rpc("submit_mission_proof", {
-              p_submission_id: submissionId,
-              p_mission_id: currentMissionId || null,
-              p_photo_url: photoUrl,
-              p_notes: normalizeTextInput(notes),
-              p_latitude: location?.lat ?? null,
-              p_longitude: location?.lng ?? null,
-            }),
+              supabase.rpc("submit_mission_proof", {
+                p_submission_id: submissionId,
+                p_mission_id: currentMissionId || null,
+                p_photo_url: photoUrl,
+                p_notes: normalizeTextInput(notes),
+                p_latitude: location?.lat ?? null,
+                p_longitude: location?.lng ?? null,
+              }),
           },
           {
             name: "submit_mission_proof_plain_params",
             run: () =>
-            supabase.rpc("submit_mission_proof", {
-              submission_id: submissionId,
-              mission_id: currentMissionId || null,
-              photo_url: photoUrl,
-              notes: normalizeTextInput(notes),
-              latitude: location?.lat ?? null,
-              longitude: location?.lng ?? null,
-            }),
+              supabase.rpc("submit_mission_proof", {
+                submission_id: submissionId,
+                mission_id: currentMissionId || null,
+                photo_url: photoUrl,
+                notes: normalizeTextInput(notes),
+                latitude: location?.lat ?? null,
+                longitude: location?.lng ?? null,
+              }),
           },
           {
             name: "submit_proof_for_submission",
             run: () =>
-            supabase.rpc("submit_proof_for_submission", {
-              p_submission_id: submissionId,
-              p_photo_url: photoUrl,
-              p_notes: normalizeTextInput(notes),
-              p_latitude: location?.lat ?? null,
-              p_longitude: location?.lng ?? null,
-            }),
+              supabase.rpc("submit_proof_for_submission", {
+                p_submission_id: submissionId,
+                p_photo_url: photoUrl,
+                p_notes: normalizeTextInput(notes),
+                p_latitude: location?.lat ?? null,
+                p_longitude: location?.lng ?? null,
+              }),
           },
         ];
 
@@ -2535,7 +2593,8 @@ export const supabaseQueries = {
             ? {
                 id: (missionUpdate.data as GenericRecord).id,
                 status: (missionUpdate.data as GenericRecord).status,
-                submitted_at: (missionUpdate.data as GenericRecord).submitted_at,
+                submitted_at: (missionUpdate.data as GenericRecord)
+                  .submitted_at,
               }
             : null,
         });
@@ -2550,20 +2609,30 @@ export const supabaseQueries = {
           if (!savedPhotoUrl) {
             return {
               data: null,
-              error: new Error("Photo proof was not saved properly. Please try uploading again."),
+              error: new Error(
+                "Photo proof was not saved properly. Please try uploading again.",
+              ),
             };
           }
 
           // VALIDATION: Ensure location was captured (lat/lng not null)
           const savedLat = normalized.latitude;
           const savedLng = normalized.longitude;
-          const hasValidLat = savedLat !== null && savedLat !== undefined && Number.isFinite(Number(savedLat));
-          const hasValidLng = savedLng !== null && savedLng !== undefined && Number.isFinite(Number(savedLng));
-          
+          const hasValidLat =
+            savedLat !== null &&
+            savedLat !== undefined &&
+            Number.isFinite(Number(savedLat));
+          const hasValidLng =
+            savedLng !== null &&
+            savedLng !== undefined &&
+            Number.isFinite(Number(savedLng));
+
           if (!hasValidLat || !hasValidLng) {
             return {
               data: null,
-              error: new Error("Location was not saved properly. Please capture location again and resubmit."),
+              error: new Error(
+                "Location was not saved properly. Please capture location again and resubmit.",
+              ),
             };
           }
 
@@ -2676,20 +2745,30 @@ export const supabaseQueries = {
             if (!savedPhotoUrl) {
               return {
                 data: null,
-                error: new Error("Photo proof was not saved properly. Please try uploading again."),
+                error: new Error(
+                  "Photo proof was not saved properly. Please try uploading again.",
+                ),
               };
             }
 
             // VALIDATION: Ensure location was mirrored (lat/lng not null)
             const savedLat = mirrored.latitude;
             const savedLng = mirrored.longitude;
-            const hasValidLat = savedLat !== null && savedLat !== undefined && Number.isFinite(Number(savedLat));
-            const hasValidLng = savedLng !== null && savedLng !== undefined && Number.isFinite(Number(savedLng));
-            
+            const hasValidLat =
+              savedLat !== null &&
+              savedLat !== undefined &&
+              Number.isFinite(Number(savedLat));
+            const hasValidLng =
+              savedLng !== null &&
+              savedLng !== undefined &&
+              Number.isFinite(Number(savedLng));
+
             if (!hasValidLat || !hasValidLng) {
               return {
                 data: null,
-                error: new Error("Location was not saved properly. Please capture location again and resubmit."),
+                error: new Error(
+                  "Location was not saved properly. Please capture location again and resubmit.",
+                ),
               };
             }
 
@@ -2827,7 +2906,8 @@ export const supabaseQueries = {
 
         return {
           data: null,
-          error: canonical.error ?? legacy.error ?? new Error("Withdraw failed"),
+          error:
+            canonical.error ?? legacy.error ?? new Error("Withdraw failed"),
         };
       } catch (error) {
         return { data: null, error: asError(error) };
@@ -3006,7 +3086,7 @@ export const supabaseQueries = {
         const legacy = await supabase
           .from("lessons")
           .select("*")
-          .or(`topic.eq.${topic},category.eq.${topic}`)
+          .eq("topic", topic)
           .order("created_at", { ascending: true });
 
         if (legacy.error) {
@@ -3235,7 +3315,10 @@ export const supabaseQueries = {
             );
             if (Number.isFinite(reward) && reward > 0) {
               let rewardApplied = false;
-              const ecoUpdate = await incrementEcoPoints(effectiveUserId, reward);
+              const ecoUpdate = await incrementEcoPoints(
+                effectiveUserId,
+                reward,
+              );
               if (!ecoUpdate.error) {
                 awardedPoints = reward;
                 rewardApplied = true;
@@ -3271,10 +3354,12 @@ export const supabaseQueries = {
           String(
             payload.topic ?? payload.topicTitle ?? "Sustainability",
           ).trim() || "Sustainability";
-        const lessonTitle =
-          String(payload.lessonTitle ?? payload.title ?? "").trim();
-        const lessonBody =
-          String(payload.lessonBody ?? payload.content ?? "").trim();
+        const lessonTitle = String(
+          payload.lessonTitle ?? payload.title ?? "",
+        ).trim();
+        const lessonBody = String(
+          payload.lessonBody ?? payload.content ?? "",
+        ).trim();
         const candidates = [
           "generate-quiz",
           "quiz-generate",
@@ -3669,7 +3754,9 @@ export const supabaseQueries = {
             }
           }
 
-          const missingIds = userIds.filter((id) => !schoolNameByUserId.has(id));
+          const missingIds = userIds.filter(
+            (id) => !schoolNameByUserId.has(id),
+          );
           if (missingIds.length > 0) {
             const profileLookup = await supabase
               .from("profiles")
@@ -3732,8 +3819,8 @@ export const supabaseQueries = {
         for (const rpcCall of rpcCandidates) {
           const { data, error } = await rpcCall;
           if (!error) {
-            const normalizedRows = ((data ?? []) as GenericRecord[]).map((row) =>
-              normalizeLeaderboardRecord(row),
+            const normalizedRows = ((data ?? []) as GenericRecord[]).map(
+              (row) => normalizeLeaderboardRecord(row),
             );
             const rows = await enrichLeaderboardRowsWithSchool(normalizedRows);
             return { data: rows, error: null };
@@ -4081,7 +4168,9 @@ export const supabaseQueries = {
           return { data: primary.data, error: null };
         }
 
-        const primaryMessage = String(primary.error.message ?? "").toLowerCase();
+        const primaryMessage = String(
+          primary.error.message ?? "",
+        ).toLowerCase();
         const shouldFallbackToStudentBadges =
           primaryMessage.includes("user_badges") &&
           (primaryMessage.includes("could not find") ||
@@ -4098,7 +4187,9 @@ export const supabaseQueries = {
           .select("*")
           .maybeSingle();
 
-        const fallbackMessage = String(fallback.error?.message ?? "").toLowerCase();
+        const fallbackMessage = String(
+          fallback.error?.message ?? "",
+        ).toLowerCase();
         const fallbackMissingTable =
           fallbackMessage.includes("student_badges") &&
           (fallbackMessage.includes("could not find") ||
@@ -4199,7 +4290,8 @@ export const supabaseQueries = {
         }
 
         const allBadges = (allBadgesResult.data ?? []) as GenericRecord[];
-        const currentBadges = (currentBadgesResult.data ?? []) as GenericRecord[];
+        const currentBadges = (currentBadgesResult.data ??
+          []) as GenericRecord[];
         const totalBadges = allBadges.length;
 
         if (totalBadges === 0) {
@@ -4218,7 +4310,10 @@ export const supabaseQueries = {
 
         const ecoPoints = Math.max(
           0,
-          toInteger(summary.eco_points ?? profile.eco_points ?? profile.points, 0),
+          toInteger(
+            summary.eco_points ?? profile.eco_points ?? profile.points,
+            0,
+          ),
         );
 
         const getRequiredPoints = (badge: GenericRecord, index: number) => {
@@ -4289,7 +4384,8 @@ export const supabaseQueries = {
           .filter((item) => !item.error)
           .map((item) => item.badge);
 
-        const awardError = awardResponses.find((item) => item.error)?.error ?? null;
+        const awardError =
+          awardResponses.find((item) => item.error)?.error ?? null;
         if (awardError) {
           return { data: null, error: awardError };
         }

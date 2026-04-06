@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useToast } from "@/components/ui/toast-provider";
-import { queryKeys } from "@/lib/query/query-keys";
 import { supabase } from "@/lib/supabase/client";
 import { supabaseQueries } from "@/lib/supabase/supabase-queries";
 import { logTelemetry } from "@/lib/utils/telemetry";
@@ -22,58 +21,6 @@ type ProofResult = {
   pointsAwarded: number;
 };
 
-type RecommendationMetrics = {
-  impressions: number;
-  clicks: number;
-  starts: number;
-  submits: number;
-  ctr: number;
-  startRate: number;
-  submitRate: number;
-};
-
-type CategoryMetrics = {
-  water: RecommendationMetrics;
-  waste: RecommendationMetrics;
-  planting: RecommendationMetrics;
-};
-
-type RecommendationVariant = "control" | "explore_diversity" | "unknown";
-
-type VariantMetrics = {
-  control: RecommendationMetrics;
-  explore_diversity: RecommendationMetrics;
-  unknown: RecommendationMetrics;
-};
-
-function emptyRecommendationMetrics(): RecommendationMetrics {
-  return {
-    impressions: 0,
-    clicks: 0,
-    starts: 0,
-    submits: 0,
-    ctr: 0,
-    startRate: 0,
-    submitRate: 0,
-  };
-}
-
-function emptyMetricsByCategory(): CategoryMetrics {
-  return {
-    water: emptyRecommendationMetrics(),
-    waste: emptyRecommendationMetrics(),
-    planting: emptyRecommendationMetrics(),
-  };
-}
-
-function emptyMetricsByVariant(): VariantMetrics {
-  return {
-    control: emptyRecommendationMetrics(),
-    explore_diversity: emptyRecommendationMetrics(),
-    unknown: emptyRecommendationMetrics(),
-  };
-}
-
 function toInt(value: unknown, fallback = 0) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.trunc(value);
@@ -90,39 +37,6 @@ function toInt(value: unknown, fallback = 0) {
 function toText(value: unknown, fallback = "") {
   const str = String(value ?? "").trim();
   return str || fallback;
-}
-
-function calculateCurrentStreak(rows: GenericRecord[]) {
-  const activeDates = new Set<string>();
-
-  for (const row of rows) {
-    const dateValue = toText((row as GenericRecord).date, "");
-    if (!dateValue) continue;
-
-    const points = toInt(
-      (row as GenericRecord).points_earned ?? (row as GenericRecord).points,
-      0,
-    );
-    if (points > 0) {
-      activeDates.add(dateValue.slice(0, 10));
-    }
-  }
-
-  let streak = 0;
-  const cursor = new Date();
-  cursor.setHours(0, 0, 0, 0);
-
-  while (streak < 365) {
-    const dateKey = cursor.toISOString().slice(0, 10);
-    if (!activeDates.has(dateKey)) {
-      break;
-    }
-
-    streak += 1;
-    cursor.setDate(cursor.getDate() - 1);
-  }
-
-  return streak;
 }
 
 async function updateEcoPoints(userId: string, addPoints: number) {
@@ -279,6 +193,8 @@ async function updateSubmissionStatus(
     proof_url: payload.photoUrl ?? null,
     proof_photo_url: payload.photoUrl ?? null,
     notes: payload.notes ?? null,
+    location_lat: payload.coords?.lat ?? null,
+    location_lng: payload.coords?.lng ?? null,
     latitude: payload.coords?.lat ?? null,
     longitude: payload.coords?.lng ?? null,
     submitted_at: new Date().toISOString(),
@@ -321,79 +237,25 @@ export function useDashboardData() {
   const queryClient = useQueryClient();
 
   const userId = user?.id;
-  const authProfile = (profile as GenericRecord | null) ?? null;
-
-  const profileQuery = useQuery({
-    queryKey: userId ? queryKeys.profile(userId) : ["profile", "anonymous"],
-    queryFn: async () => {
-      if (!userId) {
-        return null;
-      }
-
-      const result = await supabaseQueries.profiles.getById(userId);
-      if (result.error) {
-        logTelemetry(
-          "warn",
-          "dashboard_profile_query_failed",
-          String(result.error),
-          { userId },
-        );
-        return authProfile;
-      }
-
-      return (result.data ?? null) as GenericRecord | null;
-    },
-    enabled: Boolean(userId),
-    staleTime: 30 * 1000,
-  });
-
-  const effectiveProfile =
-    (profileQuery.data as GenericRecord | null | undefined) ?? authProfile;
-
   const currentSchoolName = toText(
-    effectiveProfile?.school_name,
+    (profile as GenericRecord | null)?.school_name,
     "",
   );
   const previousSubmissionStatusRef = useRef<Record<string, string>>({});
-  const loggedMissionImpressionsRef = useRef<Set<string>>(new Set());
-
-  const invalidateLiveStudentViews = useCallback(
-    async (reason: string) => {
-      if (!userId) return;
-
-      if (__DEV__) {
-        console.log("[student-realtime] invalidating student caches", {
-          userId,
-          reason,
-        });
-      }
-
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: queryKeys.submissions(userId),
-        }),
-        queryClient.invalidateQueries({ queryKey: ["activity", userId] }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.profile(userId) }),
-        queryClient.invalidateQueries({ queryKey: ["rank", userId] }),
-        queryClient.invalidateQueries({ queryKey: ["leaderboard"] }),
-        queryClient.invalidateQueries({ queryKey: ["weekly-points", userId] }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.dailyPoints(userId) }),
-      ]);
-    },
-    [queryClient, userId],
-  );
 
   const refreshProfile = useCallback(async () => {
     if (!userId) return;
 
-    await invalidateLiveStudentViews("refresh_profile");
+    // Refresh dependent dashboard caches and profile-backed queries.
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["rank", userId] }),
+      queryClient.invalidateQueries({ queryKey: ["leaderboard"] }),
+      queryClient.invalidateQueries({ queryKey: ["weekly-points", userId] }),
+    ]);
 
-    // Trigger direct profile read and write into cache so UI updates immediately.
-    const latestProfile = await supabaseQueries.profiles.getById(userId);
-    if (!latestProfile.error && latestProfile.data) {
-      queryClient.setQueryData(queryKeys.profile(userId), latestProfile.data);
-    }
-  }, [invalidateLiveStudentViews, queryClient, userId]);
+    // Trigger a direct profile read to surface RLS/data errors early.
+    await supabaseQueries.profiles.getById(userId);
+  }, [queryClient, userId]);
 
   useEffect(() => {
     if (!userId) return;
@@ -422,14 +284,12 @@ export function useDashboardData() {
               "realtime_mission_submissions_change",
               "Change detected in mission_submissions",
             );
-            if (__DEV__) {
-              console.log("[student-realtime] mission_submissions event", {
-                eventType: payload.eventType,
-                table: payload.table,
-                userId,
-              });
-            }
-            await invalidateLiveStudentViews("mission_submissions_change");
+            await Promise.all([
+              queryClient.invalidateQueries({
+                queryKey: ["submissions", userId],
+              }),
+              queryClient.invalidateQueries({ queryKey: ["activity", userId] }),
+            ]);
           },
         );
 
@@ -449,14 +309,16 @@ export function useDashboardData() {
               "realtime_submissions_change",
               "Change detected in submissions",
             );
-            if (__DEV__) {
-              console.log("[student-realtime] submissions event", {
-                eventType: payload.eventType,
-                table: payload.table,
-                userId,
-              });
-            }
-            await invalidateLiveStudentViews("submissions_change");
+            await Promise.all([
+              queryClient.invalidateQueries({
+                queryKey: ["submissions", userId],
+              }),
+              queryClient.invalidateQueries({ queryKey: ["activity", userId] }),
+              queryClient.invalidateQueries({
+                queryKey: ["dashboard-missions"],
+              }),
+            ]);
+            await refreshProfile();
           },
         );
 
@@ -498,14 +360,13 @@ export function useDashboardData() {
               "realtime_daily_points_change",
               "Daily points updated",
             );
-            if (__DEV__) {
-              console.log("[student-realtime] daily_points event", {
-                eventType: payload.eventType,
-                table: payload.table,
-                userId,
-              });
-            }
-            await invalidateLiveStudentViews("daily_points_change");
+            await Promise.all([
+              queryClient.invalidateQueries({
+                queryKey: ["weekly-points", userId],
+              }),
+              queryClient.invalidateQueries({ queryKey: ["rank", userId] }),
+              queryClient.invalidateQueries({ queryKey: ["leaderboard"] }),
+            ]);
           },
         );
 
@@ -525,7 +386,13 @@ export function useDashboardData() {
               "realtime_weekly_points_change",
               "Weekly points updated",
             );
-            await invalidateLiveStudentViews("weekly_points_change");
+            await Promise.all([
+              queryClient.invalidateQueries({
+                queryKey: ["weekly-points", userId],
+              }),
+              queryClient.invalidateQueries({ queryKey: ["rank", userId] }),
+              queryClient.invalidateQueries({ queryKey: ["leaderboard"] }),
+            ]);
           },
         );
 
@@ -533,7 +400,7 @@ export function useDashboardData() {
         channel = channel.on(
           "postgres_changes",
           {
-            event: "*",
+            event: "UPDATE",
             schema: "public",
             table: "profiles",
             filter: `id=eq.${userId}`,
@@ -541,14 +408,7 @@ export function useDashboardData() {
           async (payload) => {
             if (unsubscribed) return;
             logTelemetry("info", "realtime_profile_change", "Profile updated");
-            if (__DEV__) {
-              console.log("[student-realtime] profiles event", {
-                eventType: payload.eventType,
-                table: payload.table,
-                userId,
-              });
-            }
-            await invalidateLiveStudentViews("profiles_change");
+            await refreshProfile();
           },
         );
 
@@ -556,7 +416,7 @@ export function useDashboardData() {
         channel = channel.on(
           "postgres_changes",
           {
-            event: "*",
+            event: "UPDATE",
             schema: "public",
             table: "students",
             filter: `id=eq.${userId}`,
@@ -568,14 +428,7 @@ export function useDashboardData() {
               "realtime_student_change",
               "Student profile updated",
             );
-            if (__DEV__) {
-              console.log("[student-realtime] students event", {
-                eventType: payload.eventType,
-                table: payload.table,
-                userId,
-              });
-            }
-            await invalidateLiveStudentViews("students_change");
+            await refreshProfile();
           },
         );
 
@@ -642,7 +495,7 @@ export function useDashboardData() {
         void supabase.removeChannel(liveChannel);
       }
     };
-  }, [invalidateLiveStudentViews, queryClient, userId]);
+  }, [queryClient, refreshProfile, userId]);
 
   const rankQuery = useQuery({
     queryKey: ["rank", userId],
@@ -700,16 +553,14 @@ export function useDashboardData() {
   });
 
   const missionsQuery = useQuery({
-    queryKey: ["dashboard-missions", userId],
+    queryKey: ["dashboard-missions"],
     queryFn: async () => {
-      if (!userId) return [];
-      const result = await supabaseQueries.missions.getRecommendations(userId, 3);
+      const result = await supabaseQueries.missions.getAll();
       if (result.error) {
         logTelemetry(
           "warn",
-          "dashboard_recommended_missions_query_failed",
+          "dashboard_missions_query_failed",
           String(result.error),
-          { userId },
         );
       }
       return (result.data ?? []).slice(0, 3);
@@ -717,67 +568,6 @@ export function useDashboardData() {
     enabled: Boolean(userId),
     staleTime: 5 * 60 * 1000, // Cache missions for 5 minutes
   });
-
-  useEffect(() => {
-    loggedMissionImpressionsRef.current = new Set();
-  }, [userId]);
-
-  const trackMissionEvent = useCallback(
-    async (
-      eventType:
-        | "mission_impression"
-        | "mission_click"
-        | "mission_start"
-        | "mission_submit"
-        | "mission_approved",
-      missionId: string,
-      metadata?: GenericRecord,
-    ) => {
-      if (!userId || !missionId) {
-        return;
-      }
-
-      const result = await supabaseQueries.activityEvents.log({
-        userId,
-        eventType,
-        missionId,
-        metadata,
-      });
-
-      if (result.error) {
-        logTelemetry(
-          "warn",
-          "dashboard_activity_event_log_failed",
-          String(result.error),
-          { userId, missionId, eventType },
-        );
-      }
-    },
-    [userId],
-  );
-
-  useEffect(() => {
-    if (!userId) {
-      return;
-    }
-
-    const rows = (missionsQuery.data ?? []) as GenericRecord[];
-    for (let index = 0; index < rows.length; index += 1) {
-      const mission = rows[index] as GenericRecord;
-      const missionId = toText(mission.id);
-      if (!missionId || loggedMissionImpressionsRef.current.has(missionId)) {
-        continue;
-      }
-
-      loggedMissionImpressionsRef.current.add(missionId);
-      const recommendationVariant = toText(mission.recommendation_variant, "");
-      void trackMissionEvent("mission_impression", missionId, {
-        rank: index + 1,
-        source: "dashboard_recommendations",
-        recommendationVariant,
-      });
-    }
-  }, [missionsQuery.data, trackMissionEvent, userId]);
 
   const submissionsQuery = useQuery({
     queryKey: ["submissions", userId],
@@ -859,267 +649,6 @@ export function useDashboardData() {
     enabled: Boolean(userId),
     staleTime: 60 * 1000, // Cache for 60s
   });
-
-  const recommendationMetricsQuery = useQuery({
-    queryKey: ["recommendation-metrics", userId],
-    queryFn: async () => {
-      if (!userId) {
-        return emptyRecommendationMetrics();
-      }
-
-      const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-      const events = await supabase
-        .from("student_activity_events")
-        .select("event_type")
-        .eq("user_id", userId)
-        .in("event_type", [
-          "mission_impression",
-          "mission_click",
-          "mission_start",
-          "mission_submit",
-        ])
-        .gte("created_at", since);
-
-      if (events.error) {
-        const message = toText(events.error.message).toLowerCase();
-        const missingTable =
-          message.includes("student_activity_events") &&
-          (message.includes("schema cache") ||
-            message.includes("does not exist") ||
-            message.includes("could not find"));
-
-        if (!missingTable) {
-          logTelemetry(
-            "warn",
-            "dashboard_recommendation_metrics_query_failed",
-            String(events.error),
-            { userId },
-          );
-        }
-
-        return emptyRecommendationMetrics();
-      }
-
-      const rows = (events.data ?? []) as GenericRecord[];
-      let impressions = 0;
-      let clicks = 0;
-      let starts = 0;
-      let submits = 0;
-
-      for (const row of rows) {
-        const eventType = toText(row.event_type).toLowerCase();
-        if (eventType === "mission_impression") {
-          impressions += 1;
-        } else if (eventType === "mission_click") {
-          clicks += 1;
-        } else if (eventType === "mission_start") {
-          starts += 1;
-        } else if (eventType === "mission_submit") {
-          submits += 1;
-        }
-      }
-
-      const ctr = Math.round((clicks / Math.max(1, impressions)) * 100);
-      const startRate = Math.round((starts / Math.max(1, clicks)) * 100);
-      const submitRate = Math.round((submits / Math.max(1, starts)) * 100);
-
-      return {
-        impressions,
-        clicks,
-        starts,
-        submits,
-        ctr,
-        startRate,
-        submitRate,
-      } as RecommendationMetrics;
-    },
-    enabled: Boolean(userId),
-    staleTime: 60 * 1000,
-  });
-
-  const recommendationMetricsByCategoryQuery = useQuery({
-    queryKey: ["recommendation-metrics-by-category", userId],
-    queryFn: async () => {
-      if (!userId) {
-        return emptyMetricsByCategory();
-      }
-
-      const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-      
-      // Fetch events with mission_id
-      const eventsRes = await supabase
-        .from("student_activity_events")
-        .select("event_type, mission_id")
-        .eq("user_id", userId)
-        .in("event_type", [
-          "mission_impression",
-          "mission_click",
-          "mission_start",
-          "mission_submit",
-        ])
-        .gte("created_at", since);
-
-      if (eventsRes.error) {
-        return emptyMetricsByCategory();
-      }
-
-      // Fetch missions to get categories
-      const missionsRes = await supabase
-        .from("missions")
-        .select("id, category");
-
-      if (missionsRes.error) {
-        return emptyMetricsByCategory();
-      }
-
-      const events = (eventsRes.data ?? []) as GenericRecord[];
-      const missions = (missionsRes.data ?? []) as GenericRecord[];
-      
-      // Build mission_id -> category map
-      const categoryMap = new Map<string, string>();
-      for (const mission of missions) {
-        const missionId = toText(mission.id);
-        const category = toText(mission.category).toLowerCase();
-        if (missionId) {
-          categoryMap.set(missionId, category);
-        }
-      }
-
-      // Aggregate metrics by category
-      const metrics: CategoryMetrics = emptyMetricsByCategory();
-      const categories = ["water", "waste", "planting"] as const;
-
-      for (const row of events) {
-        const eventType = toText(row.event_type).toLowerCase();
-        const missionId = toText(row.mission_id);
-        const category = missionId ? categoryMap.get(missionId) : "";
-
-        if (!category || !categories.includes(category as typeof categories[number])) {
-          continue;
-        }
-
-        const cat = category as "water" | "waste" | "planting";
-
-        if (eventType === "mission_impression") {
-          metrics[cat].impressions += 1;
-        } else if (eventType === "mission_click") {
-          metrics[cat].clicks += 1;
-        } else if (eventType === "mission_start") {
-          metrics[cat].starts += 1;
-        } else if (eventType === "mission_submit") {
-          metrics[cat].submits += 1;
-        }
-      }
-
-      // Calculate rates for each category
-      for (const cat of categories) {
-        const m = metrics[cat];
-        m.ctr = Math.round((m.clicks / Math.max(1, m.impressions)) * 100);
-        m.startRate = Math.round((m.starts / Math.max(1, m.clicks)) * 100);
-        m.submitRate = Math.round((m.submits / Math.max(1, m.starts)) * 100);
-      }
-
-      return metrics;
-    },
-    enabled: Boolean(userId),
-    staleTime: 60 * 1000,
-  });
-
-  const recommendationMetricsByVariantQuery = useQuery({
-    queryKey: ["recommendation-metrics-by-variant", userId],
-    queryFn: async () => {
-      if (!userId) {
-        return emptyMetricsByVariant();
-      }
-
-      const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-      const events = await supabase
-        .from("student_activity_events")
-        .select("event_type,metadata")
-        .eq("user_id", userId)
-        .in("event_type", [
-          "mission_impression",
-          "mission_click",
-          "mission_start",
-          "mission_submit",
-        ])
-        .gte("created_at", since);
-
-      if (events.error) {
-        const message = toText(events.error.message).toLowerCase();
-        const missingTable =
-          message.includes("student_activity_events") &&
-          (message.includes("schema cache") ||
-            message.includes("does not exist") ||
-            message.includes("could not find"));
-
-        if (!missingTable) {
-          logTelemetry(
-            "warn",
-            "dashboard_recommendation_variant_metrics_query_failed",
-            String(events.error),
-            { userId },
-          );
-        }
-
-        return emptyMetricsByVariant();
-      }
-
-      const rows = (events.data ?? []) as GenericRecord[];
-      const metrics = emptyMetricsByVariant();
-
-      for (const row of rows) {
-        const eventType = toText(row.event_type).toLowerCase();
-        const metadata = (row.metadata as GenericRecord | null) ?? null;
-        const rawVariant = toText(
-          metadata?.recommendationVariant ?? metadata?.recommendation_variant,
-        ).toLowerCase();
-
-        let variant: RecommendationVariant = "unknown";
-        if (rawVariant === "control" || rawVariant === "explore_diversity") {
-          variant = rawVariant;
-        }
-
-        if (eventType === "mission_impression") {
-          metrics[variant].impressions += 1;
-        } else if (eventType === "mission_click") {
-          metrics[variant].clicks += 1;
-        } else if (eventType === "mission_start") {
-          metrics[variant].starts += 1;
-        } else if (eventType === "mission_submit") {
-          metrics[variant].submits += 1;
-        }
-      }
-
-      const variants: RecommendationVariant[] = [
-        "control",
-        "explore_diversity",
-        "unknown",
-      ];
-
-      for (const variant of variants) {
-        const metric = metrics[variant];
-        metric.ctr = Math.round(
-          (metric.clicks / Math.max(1, metric.impressions)) * 100,
-        );
-        metric.startRate = Math.round(
-          (metric.starts / Math.max(1, metric.clicks)) * 100,
-        );
-        metric.submitRate = Math.round(
-          (metric.submits / Math.max(1, metric.starts)) * 100,
-        );
-      }
-
-      return metrics;
-    },
-    enabled: Boolean(userId),
-    staleTime: 60 * 1000,
-  });
-
-  const streakDays = useMemo(() => {
-    const rows = (weeklyQuery.data ?? []) as GenericRecord[];
-    return calculateCurrentStreak(rows);
-  }, [weeklyQuery.data]);
 
   const activityQuery = useQuery({
     queryKey: ["activity", userId],
@@ -1203,116 +732,49 @@ export function useDashboardData() {
     mutationFn: async (missionId: string) => {
       if (!userId) throw new Error("Not authenticated");
 
-      const missionResponse = await supabaseQueries.missions.getById(missionId);
-      const mission = (missionResponse.data ?? null) as GenericRecord | null;
-      const missionReward = Math.max(
-        0,
-        toInt(mission?.eco_points_reward ?? mission?.points ?? 0),
-      );
-
       // Check if already accepted before attempting to create
       const existing =
         await supabaseQueries.missionSubmissions.getSubmissionForMission(
           userId,
           missionId,
         );
-      let submission = !existing.error ? (existing.data ?? null) : null;
-      let submissionId = toText((submission as GenericRecord | null)?.id);
-
-      if (submission) {
-        const currentStatus = toText((submission as GenericRecord).status).toLowerCase();
-        if (currentStatus === "approved") {
-          logTelemetry(
-            "info",
-            "dashboard_mission_already_completed",
-            "Mission already completed",
-            { userId, missionId },
-          );
-          return {
-            submission,
-            autoCompleted: true,
-            pointsAwarded: 0,
-            alreadyAccepted: true,
-          };
-        }
-      }
-
-      if (!submissionId) {
-        const created = await supabaseQueries.missionSubmissions.create({
-          user_id: userId,
-          mission_id: missionId,
-          status: "in_progress",
-        });
-
-        if (created.error) {
-          logTelemetry(
-            "error",
-            "dashboard_mission_create_failed",
-            String(created.error),
-            { userId, missionId },
-          );
-          throw created.error;
-        }
-
-        if (!created.data) {
-          throw new Error("Failed to create mission submission");
-        }
-
-        submission = created.data;
-        submissionId = toText((created.data as GenericRecord).id);
-      }
-
-      if (!submissionId) {
-        throw new Error("Mission submission id missing");
-      }
-
-      // Student submits proof -> submitProof mutation handles auto-approve logic
-      // or sets to pending for teacher review. Never auto-approve at Accept step.
-      logTelemetry(
-        "info",
-        "dashboard_mission_accepted",
-        "Mission accepted, student can now submit proof",
-        { userId, missionId, submissionId },
-      );
-
-      if (!existing.data) {
-        const recommendedMission = ((missionsQuery.data ?? []) as GenericRecord[]).find(
-          (row) => toText((row as GenericRecord).id) === missionId,
-        ) as GenericRecord | undefined;
-        const recommendationVariant = toText(
-          recommendedMission?.recommendation_variant,
-          "",
+      if (!existing.error && existing.data) {
+        logTelemetry(
+          "info",
+          "dashboard_mission_already_accepted",
+          "Mission already in progress",
+          { userId, missionId },
         );
-
-        await trackMissionEvent("mission_start", missionId, {
-          source: "dashboard_accept_button",
-          submissionId,
-          recommendationVariant,
-        });
+        return existing.data;
       }
 
-      return {
-        submission,
-        autoCompleted: false,
-        pointsAwarded: 0,
-        alreadyAccepted: Boolean(existing.data),
-      };
+      const created = await supabaseQueries.missionSubmissions.create({
+        user_id: userId,
+        mission_id: missionId,
+        status: "in_progress",
+      });
+
+      if (created.error) {
+        logTelemetry(
+          "error",
+          "dashboard_mission_create_failed",
+          String(created.error),
+          { userId, missionId },
+        );
+        throw created.error;
+      }
+
+      if (!created.data) {
+        throw new Error("Failed to create mission submission");
+      }
+
+      return created.data;
     },
-    onSuccess: (result) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["submissions", userId] });
       queryClient.invalidateQueries({ queryKey: ["activity", userId] });
-      queryClient.invalidateQueries({ queryKey: ["weekly-points", userId] });
-      queryClient.invalidateQueries({ queryKey: ["rank", userId] });
-      queryClient.invalidateQueries({ queryKey: ["leaderboard"] });
-      queryClient.invalidateQueries({ queryKey: ["notifications", userId] });
-
-      if (result?.alreadyAccepted) {
-        showToast("Quest already started.", "info");
-        return;
-      }
-
       showToast(
-        "Quest accepted. Now submit your proof for teacher review.",
+        "Quest accepted. Complete and submit proof for points.",
         "success",
       );
     },
@@ -1395,30 +857,6 @@ export function useDashboardData() {
           "Proof auto-approved",
           { userId, submissionId, pointsAwarded: points },
         );
-
-        const missionId = toText(mission.id);
-        const recommendedMission = ((missionsQuery.data ?? []) as GenericRecord[]).find(
-          (row) => toText((row as GenericRecord).id) === missionId,
-        ) as GenericRecord | undefined;
-        const recommendationVariant = toText(
-          recommendedMission?.recommendation_variant,
-          "",
-        );
-        if (missionId) {
-          await trackMissionEvent("mission_submit", missionId, {
-            source: "dashboard_proof_submit",
-            submissionId,
-            autoApproved: true,
-            pointsAwarded: points,
-            recommendationVariant,
-          });
-          await trackMissionEvent("mission_approved", missionId, {
-            source: "dashboard_proof_submit",
-            submissionId,
-            pointsAwarded: points,
-            recommendationVariant,
-          });
-        }
         return { autoApproved: true, pointsAwarded: points };
       }
 
@@ -1455,23 +893,6 @@ export function useDashboardData() {
         "Proof submitted for review",
         { userId, submissionId },
       );
-
-      const missionId = toText(mission.id);
-      const recommendedMission = ((missionsQuery.data ?? []) as GenericRecord[]).find(
-        (row) => toText((row as GenericRecord).id) === missionId,
-      ) as GenericRecord | undefined;
-      const recommendationVariant = toText(
-        recommendedMission?.recommendation_variant,
-        "",
-      );
-      if (missionId) {
-        await trackMissionEvent("mission_submit", missionId, {
-          source: "dashboard_proof_submit",
-          submissionId,
-          autoApproved: false,
-          recommendationVariant,
-        });
-      }
       return { autoApproved: false, pointsAwarded: 0 };
     },
     onSuccess: async (result) => {
@@ -1545,7 +966,7 @@ export function useDashboardData() {
   };
 
   return {
-    profile: effectiveProfile,
+    profile,
     rank: rankQuery.data ?? 999,
     leaderboard: leaderboardQuery.data ?? [],
     missions: missionsQuery.data ?? [],
@@ -1556,16 +977,8 @@ export function useDashboardData() {
     unreadCount,
     treesPlanted: treesPlantedQuery.data ?? 0,
     realUserCount: realUserCountQuery.data ?? 0,
-    recommendationMetrics:
-      recommendationMetricsQuery.data ?? emptyRecommendationMetrics(),
-    recommendationMetricsByCategory:
-      recommendationMetricsByCategoryQuery.data ?? emptyMetricsByCategory(),
-    recommendationMetricsByVariant:
-      recommendationMetricsByVariantQuery.data ?? emptyMetricsByVariant(),
-    streakDays,
-    isLoading: !effectiveProfile || missionsQuery.isLoading || profileQuery.isLoading,
+    isLoading: !profile || missionsQuery.isLoading,
     acceptMission,
-    trackMissionEvent,
     submitProof,
     checkAutoApprove,
     markAllRead,

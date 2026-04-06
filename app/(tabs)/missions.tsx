@@ -13,10 +13,13 @@ import {
 import Animated, { FadeInDown, FadeOutUp } from "react-native-reanimated";
 
 import { ThemedText } from "@/components/themed-text";
-import { GlassCard } from "@/components/ui/glass-card";
+import { ThemedView } from "@/components/themed-view";
+import { useToast } from "@/components/ui/toast-provider";
 import { invalidateStudentCache } from "@/lib/query/invalidate-student-cache";
+import { getSupabaseProjectDiagnostics } from "@/lib/supabase/client";
 import { supabaseQueries } from "@/lib/supabase/supabase-queries";
 import { getErrorMessage, retryQuery } from "@/lib/utils/resilience";
+import { debugMobileSupabaseTarget } from "@/mobile-debug/SupabaseProjectCheckSnippet";
 import { useAuth } from "@/providers/auth-provider";
 
 type MissionRecord = Record<string, unknown>;
@@ -41,13 +44,14 @@ function submissionStatus(submission: MissionRecord) {
 
 export default function MissionsScreen() {
   const { user } = useAuth();
+  const { showToast } = useToast();
   const queryClient = useQueryClient();
   const [loading, setLoading] = useState(true);
   const [submittingId, setSubmittingId] = useState("");
   const [missions, setMissions] = useState<MissionRecord[]>([]);
   const [submissions, setSubmissions] = useState<MissionRecord[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
-  const [showConfetti] = useState(false);
+  const [showConfetti, setShowConfetti] = useState(false);
 
   const missionTitleById = useMemo(() => {
     return missions.reduce<Record<string, string>>((acc, mission) => {
@@ -162,6 +166,19 @@ export default function MissionsScreen() {
 
     setSubmittingId(selectedMissionId);
 
+    const diagnostics = getSupabaseProjectDiagnostics();
+    console.log("[missions-tab] accept before create", {
+      payload: {
+        user_id: user.id,
+        mission_id: selectedMissionId,
+        status: "in_progress",
+      },
+      authUserId: user.id,
+      projectRef: diagnostics.urlRef,
+      expectedRef: diagnostics.expectedRef,
+      projectMatches: diagnostics.matchesExpected,
+    });
+
     const startResponse = await retryQuery(() =>
       supabaseQueries.missionSubmissions.create({
         user_id: user.id,
@@ -169,6 +186,27 @@ export default function MissionsScreen() {
         status: "in_progress",
       }),
     );
+
+    console.log("[missions-tab] accept after create", {
+      error: startResponse.error
+        ? {
+            summary: getErrorMessage(
+              startResponse.error,
+              "Unknown mission create error",
+            ),
+            raw: startResponse.error,
+          }
+        : null,
+      row: startResponse.data
+        ? {
+            id: startResponse.data.id,
+            status: startResponse.data.status,
+            submitted_at: startResponse.data.submitted_at,
+            mission_id: startResponse.data.mission_id,
+            user_id: startResponse.data.user_id,
+          }
+        : null,
+    });
 
     if (startResponse.error || !startResponse.data) {
       Alert.alert(
@@ -185,6 +223,12 @@ export default function MissionsScreen() {
     );
     await invalidateStudentCache(queryClient, user.id);
     void loadMissions();
+    if (__DEV__) {
+      await debugMobileSupabaseTarget({
+        reason: "missions-tab-after-accept",
+        submissionId: String(startResponse.data.id ?? "").trim() || undefined,
+      });
+    }
     router.push({
       pathname: "/mission/[missionId]",
       params: { missionId: selectedMissionId },
@@ -204,27 +248,19 @@ export default function MissionsScreen() {
         </Animated.View>
       ) : null}
       <ScrollView contentContainerStyle={styles.container}>
-        <Animated.View entering={FadeInDown.duration(350)}>
-          <GlassCard style={styles.headerCard}>
-            <ThemedText type="title" style={styles.headerTitle}>
-              🎯 Missions
-            </ThemedText>
-            <ThemedText style={styles.headerSubtitle}>
-              Complete missions and submit proof for teacher review
-            </ThemedText>
-          </GlassCard>
-        </Animated.View>
+        <ThemedText type="title">Missions</ThemedText>
+        <ThemedText>
+          Start missions and submit proof for teacher review.
+        </ThemedText>
 
-        <Animated.View entering={FadeInDown.delay(60).duration(350)}>
-          <Pressable
-            style={styles.reloadButton}
-            onPress={() => void loadMissions()}
-          >
-            <ThemedText style={styles.reloadButtonLabel}>
-              ↻ Reload Missions
-            </ThemedText>
-          </Pressable>
-        </Animated.View>
+        <Pressable
+          style={styles.secondaryButton}
+          onPress={() => void loadMissions()}
+        >
+          <ThemedText style={styles.secondaryButtonLabel}>
+            Reload Missions
+          </ThemedText>
+        </Pressable>
 
         {loading ? (
           <View style={styles.centered}>
@@ -234,135 +270,86 @@ export default function MissionsScreen() {
         ) : null}
 
         {errorMessage ? (
-          <GlassCard style={styles.errorCard}>
-            <ThemedText style={styles.errorText}>{errorMessage}</ThemedText>
-          </GlassCard>
+          <ThemedText style={styles.errorText}>{errorMessage}</ThemedText>
         ) : null}
 
         {!loading && missions.length === 0 ? (
-          <GlassCard>
-            <ThemedText>No missions found.</ThemedText>
-          </GlassCard>
+          <ThemedText>No missions found.</ThemedText>
         ) : null}
 
-        {missions.map((mission, missionIndex) => {
+        {missions.map((mission) => {
           const id = missionId(mission);
-          const busyStart = submittingId === id;
-
           return (
-            <Animated.View
-              key={id || missionTitle(mission)}
-              entering={FadeInDown.delay(105 + missionIndex * 45).duration(350)}
-            >
-              <GlassCard style={styles.missionCard}>
-                <View style={styles.missionHeader}>
-                  <View style={{ flex: 1 }}>
-                    <ThemedText type="subtitle" style={styles.missionTitle}>
-                      {missionTitle(mission)}
-                    </ThemedText>
-                    <ThemedText style={styles.missionDescription}>
-                      {missionDescription(mission)}
-                    </ThemedText>
-                  </View>
-                </View>
-
-                <View style={styles.missionActions}>
-                  <Pressable
-                    style={styles.secondaryAction}
-                    onPress={() => {
-                      if (!id) {
-                        return;
-                      }
-                      router.push({
-                        pathname: "/mission/[missionId]",
-                        params: { missionId: id },
-                      });
-                    }}
-                  >
-                    <ThemedText style={styles.secondaryActionLabel}>
-                      📋 View Details
-                    </ThemedText>
-                  </Pressable>
-
-                  <Pressable
-                    style={styles.primaryAction}
-                    onPress={() => void startMission(mission)}
-                    disabled={busyStart || !id}
-                  >
-                    {busyStart ? (
-                      <ActivityIndicator color="#ffffff" size="small" />
-                    ) : (
-                      <ThemedText style={styles.primaryActionLabel}>
-                        ▶ Start
-                      </ThemedText>
-                    )}
-                  </Pressable>
-                </View>
-
-                <ThemedText style={styles.metaText}>
-                  Complete steps → upload proof → submit from detail page
+            <ThemedView key={id || missionTitle(mission)} style={styles.card}>
+              <ThemedText type="subtitle">{missionTitle(mission)}</ThemedText>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.secondarySubmitButton,
+                  pressed ? styles.pressed : null,
+                ]}
+                onPress={() => {
+                  if (!id) {
+                    return;
+                  }
+                  router.push({
+                    pathname: "/mission/[missionId]",
+                    params: { missionId: id },
+                  });
+                }}
+              >
+                <ThemedText style={styles.secondaryButtonLabel}>
+                  Open Mission Detail
                 </ThemedText>
-              </GlassCard>
-            </Animated.View>
+              </Pressable>
+            </ThemedView>
           );
         })}
 
-        <Animated.View entering={FadeInDown.delay(600).duration(360)}>
-          <GlassCard style={styles.historyCard}>
-            <ThemedText type="subtitle" style={styles.historyTitle}>
-              📊 My Submissions
-            </ThemedText>
-            {recentSubmissions.length === 0 ? (
-              <ThemedText style={styles.emptyText}>No submissions yet.</ThemedText>
-            ) : (
-              <View style={styles.historyList}>
-                {recentSubmissions.slice(0, 8).map((entry, index) => {
-                  const status = submissionStatus(entry);
-                  const missionRef = String(entry.mission_id ?? "N/A");
-                  const resolvedMissionTitle =
-                    missionTitleById[missionRef] ?? `Mission ${missionRef}`;
-                  return (
-                    <View
-                      key={`${String(entry.id ?? index)}-${index}`}
-                      style={styles.historyItem}
-                    >
-                      <View style={styles.historyItemTop}>
-                        <ThemedText style={styles.historyMissionName}>
-                          {resolvedMissionTitle}
-                        </ThemedText>
-                        <View
-                          style={[
-                            styles.statusChip,
-                            status === "approved" ? styles.statusApproved : null,
-                            status === "rejected" ? styles.statusRejected : null,
-                            status === "pending"
-                              ? styles.statusPending
-                              : null,
-                            status === "in_progress"
-                              ? styles.statusInProgress
-                              : null,
-                          ]}
-                        >
-                          <ThemedText style={styles.statusChipText}>
-                            {status}
-                          </ThemedText>
-                        </View>
-                      </View>
-                      <ThemedText style={styles.historyTimestamp}>
-                        {String(
-                          entry.updated_at ??
-                            entry.submitted_at ??
-                            entry.created_at ??
-                            "N/A",
-                        )}
-                      </ThemedText>
-                    </View>
-                  );
-                })}
-              </View>
-            )}
-          </GlassCard>
-        </Animated.View>
+        <ThemedView style={styles.historyCard}>
+          <ThemedText type="subtitle">My Submissions</ThemedText>
+          {recentSubmissions.length === 0 ? (
+            <ThemedText>No submissions yet.</ThemedText>
+          ) : null}
+          {recentSubmissions.slice(0, 8).map((entry, index) => {
+            const status = submissionStatus(entry);
+            const missionRef = String(entry.mission_id ?? "N/A");
+            const resolvedMissionTitle =
+              missionTitleById[missionRef] ?? `Mission ${missionRef}`;
+            return (
+              <ThemedView
+                key={`${String(entry.id ?? index)}-${index}`}
+                style={styles.historyItem}
+              >
+                <ThemedText>Mission: {resolvedMissionTitle}</ThemedText>
+                <View style={styles.statusRow}>
+                  <ThemedText>Status:</ThemedText>
+                  <View
+                    style={[
+                      styles.statusChip,
+                      status === "approved" ? styles.statusApproved : null,
+                      status === "rejected" ? styles.statusRejected : null,
+                      status === "submitted" ? styles.statusSubmitted : null,
+                      status === "in_progress" ? styles.statusInProgress : null,
+                    ]}
+                  >
+                    <ThemedText style={styles.statusChipText}>
+                      {status}
+                    </ThemedText>
+                  </View>
+                </View>
+                <ThemedText>
+                  Updated:{" "}
+                  {String(
+                    entry.updated_at ??
+                      entry.submitted_at ??
+                      entry.created_at ??
+                      "N/A",
+                  )}
+                </ThemedText>
+              </ThemedView>
+            );
+          })}
+        </ThemedView>
       </ScrollView>
     </View>
   );
@@ -385,148 +372,99 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 12,
   },
-  headerCard: {
-    gap: 6,
-  },
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: "700",
-  },
-  headerSubtitle: {
-    fontSize: 13,
-    opacity: 0.7,
-  },
-  reloadButton: {
-    minHeight: 40,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(59, 130, 246, 0.12)",
-  },
-  reloadButtonLabel: {
-    color: "#3b82f6",
-    fontWeight: "600",
-    fontSize: 13,
-  },
   centered: {
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
     paddingVertical: 20,
   },
-  errorCard: {
+  card: {
     borderWidth: 1,
-    borderColor: "rgba(239, 68, 68, 0.3)",
-  },
-  errorText: {
-    color: "#ef4444",
-  },
-  missionCard: {
-    gap: 12,
-  },
-  missionHeader: {
+    borderColor: "rgba(10,126,164,0.22)",
+    borderRadius: 14,
+    padding: 14,
     gap: 8,
   },
-  missionTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  missionDescription: {
-    fontSize: 13,
-    opacity: 0.7,
-    marginTop: 4,
-  },
-  missionActions: {
-    flexDirection: "row",
-    gap: 10,
-  },
-  secondaryAction: {
-    flex: 1,
-    minHeight: 40,
-    borderRadius: 10,
+  primaryButton: {
+    marginTop: 8,
+    minHeight: 48,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(59, 130, 246, 0.12)",
+    backgroundColor: "#0a7ea4",
   },
-  secondaryActionLabel: {
-    color: "#3b82f6",
-    fontWeight: "600",
-    fontSize: 13,
-  },
-  primaryAction: {
-    flex: 1,
-    minHeight: 40,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-    backgroundColor: "#10b981",
-  },
-  primaryActionLabel: {
+  primaryButtonLabel: {
     color: "#ffffff",
     fontWeight: "700",
-    fontSize: 13,
+  },
+  secondaryButton: {
+    minHeight: 44,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(10,126,164,0.12)",
+  },
+  secondaryButtonLabel: {
+    color: "#0a7ea4",
+    fontWeight: "700",
+  },
+  pressed: {
+    opacity: 0.86,
   },
   metaText: {
     fontSize: 12,
-    opacity: 0.6,
-    marginTop: 4,
+    opacity: 0.8,
   },
-  emptyText: {
-    opacity: 0.6,
+  secondarySubmitButton: {
+    marginTop: 8,
+    minHeight: 46,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#136f8f",
   },
   historyCard: {
-    gap: 12,
-  },
-  historyTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  historyList: {
+    borderWidth: 1,
+    borderColor: "rgba(10,126,164,0.2)",
+    borderRadius: 12,
+    padding: 12,
     gap: 8,
   },
   historyItem: {
     borderWidth: 1,
-    borderColor: "rgba(156, 163, 175, 0.2)",
+    borderColor: "rgba(10,126,164,0.14)",
     borderRadius: 10,
-    padding: 10,
-    gap: 6,
-    backgroundColor: "rgba(16, 185, 129, 0.02)",
+    padding: 8,
+    gap: 4,
   },
-  historyItemTop: {
+  statusRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-  },
-  historyMissionName: {
-    fontWeight: "600",
-    fontSize: 14,
-    flex: 1,
-  },
-  historyTimestamp: {
-    fontSize: 12,
-    opacity: 0.6,
+    gap: 6,
   },
   statusChip: {
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 999,
-    backgroundColor: "rgba(107, 114, 128, 0.2)",
+    backgroundColor: "rgba(110,110,110,0.16)",
   },
   statusApproved: {
-    backgroundColor: "rgba(16, 185, 129, 0.2)",
+    backgroundColor: "rgba(46,125,50,0.22)",
   },
   statusRejected: {
-    backgroundColor: "rgba(239, 68, 68, 0.2)",
+    backgroundColor: "rgba(176,0,32,0.22)",
   },
-  statusPending: {
-    backgroundColor: "rgba(59, 130, 246, 0.2)",
+  statusSubmitted: {
+    backgroundColor: "rgba(19,111,143,0.22)",
   },
   statusInProgress: {
-    backgroundColor: "rgba(245, 158, 11, 0.2)",
+    backgroundColor: "rgba(245,124,0,0.22)",
   },
   statusChipText: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "700",
+  },
+  errorText: {
+    color: "#b00020",
   },
 });
